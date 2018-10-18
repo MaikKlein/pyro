@@ -22,7 +22,7 @@ fn main() {
     // // world.matcher::<All<Query>>().for_each(|(i, f)| {
     // //     println!("{}", f);
     // // });
-    // world.matcher::<All<(Read<u32>, Read<&str>)>>().for_each(|(i, f)| {
-    //     println!("{}", f);
-    // });
+    world.matcher::<All<(Read<u32>)>>().for_each(|(f)| {
+        println!("{}", f);
+    });
 }

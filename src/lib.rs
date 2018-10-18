@@ -115,7 +115,6 @@ where
             && types.contains(&TypeId::of::<B::Component>())
     }
 }
-pub struct All<'s, Tuple>(pub PhantomData<&'s Tuple>);
 
 pub trait ReadComponent {
     type Component: Component;
@@ -181,6 +180,7 @@ pub trait Query<'s> {
     fn query<S: Storage>(storage: &'s mut S) -> Option<Self::Iter>;
 }
 
+pub struct All<'s, Tuple>(pub PhantomData<&'s Tuple>);
 impl<'s, A, B> Matcher for All<'s, (A, B)>
 where
     A: Fetch<'s>,
@@ -191,20 +191,55 @@ where
     }
 }
 
-impl<'s, A, B> Query<'s> for All<'s, (A, B)>
+impl<'s, A> Query<'s> for All<'s, A>
 where
     A: Fetch<'s>,
-    B: Fetch<'s>,
 {
-    type Iter = Zip<(A::Iter, B::Iter)>;
+    type Iter = A::Iter;
     fn query<S: Storage>(storage: &'s mut S) -> Option<Self::Iter> {
-        unsafe {
-            let i1 = A::fetch(storage)?;
-            let i2 = B::fetch(storage)?;
-            Some(multizip((i1, i2)))
+        unsafe { A::fetch(storage) }
+    }
+}
+
+macro_rules! impl_query_all{
+    ($($ty: ident),*) => {
+        impl<'s, $($ty,)*> Query<'s> for All<'s, ($($ty,)*)>
+        where
+            $(
+                $ty: Fetch<'s>,
+            )*
+        {
+            type Iter = Zip<($($ty::Iter,)*)>;
+            fn query<S: Storage>(storage: &'s mut S) -> Option<Self::Iter> {
+                unsafe {
+                    Some(multizip(($($ty::fetch(storage)?,)*)))
+                }
+            }
         }
     }
 }
+
+impl_query_all!(A, B);
+impl_query_all!(A, B, C);
+impl_query_all!(A, B, C, D);
+impl_query_all!(A, B, C, D, E);
+impl_query_all!(A, B, C, D, E, F);
+impl_query_all!(A, B, C, D, E, F, G);
+
+// impl<'s, A, B> Query<'s> for All<'s, (A, B)>
+// where
+//     A: Fetch<'s>,
+//     B: Fetch<'s>,
+// {
+//     type Iter = Zip<(A::Iter, B::Iter)>;
+//     fn query<S: Storage>(storage: &'s mut S) -> Option<Self::Iter> {
+//         unsafe {
+//             let i1 = A::fetch(storage)?;
+//             let i2 = B::fetch(storage)?;
+//             Some(multizip((i1, i2)))
+//         }
+//     }
+// }
 
 pub struct EmptyStorage<S> {
     storage: S,
