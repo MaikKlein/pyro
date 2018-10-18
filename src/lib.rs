@@ -249,17 +249,25 @@ pub trait BuildStorage {
     fn build<S: Storage + Clone + RegisterComponent>() -> EmptyStorage<S>;
 }
 
-impl<A, B> BuildStorage for (A, B)
-where
-    A: Component,
-    B: Component,
-{
-    fn build<S: Storage + Clone + RegisterComponent>() -> EmptyStorage<S> {
-        S::empty()
-            .register_component::<A>()
-            .register_component::<B>()
+macro_rules! impl_build_storage {
+    ($($ty: ident),*) => {
+        impl<$($ty),*> BuildStorage for ($($ty),*)
+        where
+            $(
+                $ty:Component,
+            )*
+        {
+            fn build<S: Storage + Clone + RegisterComponent>() -> EmptyStorage<S> {
+                S::empty()$(.register_component::<$ty>())*
+            }
+        }
     }
 }
+impl_build_storage!(A, B);
+impl_build_storage!(A, B, C);
+impl_build_storage!(A, B, C, D);
+impl_build_storage!(A, B, C, D, E);
+impl_build_storage!(A, B, C, D, E, F);
 
 impl<S> EmptyStorage<S>
 where
@@ -307,9 +315,54 @@ pub trait ComponentList {
     const SIZE: usize;
     type Components;
 }
-impl<A, B> ComponentList for (A, B) {
-    const SIZE: usize = 2;
-    type Components = (A, B);
+
+macro_rules! impl_component_list {
+    ($size: expr => $($ty: ident),*) => {
+        impl<$($ty,)*> ComponentList for ($($ty),*) {
+            const SIZE: usize = $size;
+            type Components = ($($ty,)*);
+        }
+    }
+}
+
+impl_component_list!(2 => A, B);
+impl_component_list!(3 => A, B, C);
+impl_component_list!(4 => A, B, C, D);
+impl_component_list!(5 => A, B, C, D, E);
+impl_component_list!(6 => A, B, C, D, E, F);
+
+macro_rules! impl_append_components {
+    ($size: expr => $($ty: ident),*) => {
+        impl<$($ty),*> AppendComponents for ($($ty,)*)
+        where
+            $(
+                $ty: Component,
+            )*
+        {
+            type ComponentList = ($($ty,)*);
+            fn is_match<S: Storage>(storage: &S) -> bool {
+                let types = storage.types();
+                let mut b = types.len() == $size;
+                $(
+                    b &= types.contains(&TypeId::of::<$ty>());
+                )*
+                b
+            }
+
+            fn append_components<I, S>(items: I, storage: &mut S)
+            where
+                S: Storage,
+                I: IntoIterator<Item = Self>,
+            {
+                #[allow(non_snake_case)]
+                for ($($ty),*) in items {
+                    $(
+                        storage.push_component($ty);
+                    )*
+                }
+            }
+        }
+    }
 }
 pub trait AppendComponents: Sized {
     type ComponentList: ComponentList + BuildStorage;
@@ -320,28 +373,11 @@ pub trait AppendComponents: Sized {
         I: IntoIterator<Item = Self>;
 }
 
-impl<A, B> AppendComponents for (A, B)
-where
-    A: Component,
-    B: Component,
-{
-    type ComponentList = (A, B);
-    fn is_match<S: Storage>(storage: &S) -> bool {
-        let types = storage.types();
-        types.len() == 2 && types.contains(&TypeId::of::<A>()) && types.contains(&TypeId::of::<B>())
-    }
-
-    fn append_components<I, S>(items: I, storage: &mut S)
-    where
-        S: Storage,
-        I: IntoIterator<Item = Self>,
-    {
-        for (a, b) in items {
-            storage.push_component(a);
-            storage.push_component(b);
-        }
-    }
-}
+impl_append_components!(2 => A, B);
+impl_append_components!(3 => A, B, C);
+impl_append_components!(4 => A, B, C, D);
+impl_append_components!(5 => A, B, C, D, E);
+impl_append_components!(6 => A, B, C, D, E, F);
 
 #[derive(Clone)]
 pub struct SoaStorage {

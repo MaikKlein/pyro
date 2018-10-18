@@ -7,3 +7,7 @@ edition = "2018"
 [dependencies]
 anymap = "0.12"
 itertools = "0.7"
+
+
+[dev-dependencies]
+cgmath = "0.16"
