@@ -2,14 +2,27 @@ extern crate ecs;
 use ecs::*;
 use std::marker::PhantomData;
 
-type Query = (Read<u32>, Read<f32>);
+type Query = (Read<u32>, Write<f32>);
 fn main() {
-    // let mut builder = StorageBuilder::<VecStorage>::new();
-    let mut storage = SoaStorage::empty()
-        .register_component::<f32>()
-        .register_component::<u32>()
-        .access();
-    storage.append_components(vec![(1.0f32, 1u32)]);
-    let r = All::<Query>::query(&mut storage).unwrap();
-    println!("{:?}", r.collect::<Vec<_>>());
+    let mut world = World::<SoaStorage>::new();
+    let entities = (0..100).map(|i|{
+        (
+            i as f32,
+            i as u32
+        )
+    });
+    world.add_entity(entities);
+    let entities = (0..100).map(|i|{
+        (
+            "Hello",
+            i as u32
+        )
+    });
+    world.add_entity(entities);
+    // // world.matcher::<All<Query>>().for_each(|(i, f)| {
+    // //     println!("{}", f);
+    // // });
+    // world.matcher::<All<(Read<u32>, Read<&str>)>>().for_each(|(i, f)| {
+    //     println!("{}", f);
+    // });
 }
