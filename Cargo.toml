@@ -11,3 +11,7 @@ itertools = "0.7"
 
 [dev-dependencies]
 cgmath = "0.16"
+rand = "0.5"
+
+[profile.release]
+debug = true

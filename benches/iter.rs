@@ -20,7 +20,7 @@ pub struct Velocity {
 fn iter(b: &mut Bencher) {
     b.iter(|| {
         let mut world = World::<SoaStorage>::new();
-        let entities = (0..10000).map(|i| {
+        let entities = (0..100000).map(|i| {
             let pos = Position {
                 x: i as f32,
                 y: i as f32,
@@ -35,13 +35,13 @@ fn iter(b: &mut Bencher) {
                 pos.x += vel.x;
                 pos.y += vel.y;
             });
-        let pos_sum = world.matcher::<All<Read<Position>>>().fold(
+        world.matcher::<All<Read<Position>>>().fold(
             Position { x: 0.0, y: 0.0 },
             |mut acc, pos| {
                 acc.x += pos.x;
                 acc.y += pos.y;
                 acc
             },
-        );
+        )
     });
 }
