@@ -6,6 +6,8 @@ edition = "2018"
 license = "MIT"
 repository = "https://github.com/MaikKlein/pyro"
 keywords = ["ecs"]
+documentation = "https://docs.rs/pyro"
+description = "Entity component system"
 
 [dependencies]
 anymap = "0.12"
