@@ -1,5 +1,5 @@
-extern crate ecs;
-use ecs::*;
+extern crate pyro;
+use pyro::*;
 use std::marker::PhantomData;
 
 type Query = (Read<u32>, Write<f32>);

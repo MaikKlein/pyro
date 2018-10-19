@@ -1,11 +1,11 @@
 #![feature(test)]
-extern crate ecs;
+extern crate pyro;
 extern crate rand;
 extern crate test;
 use self::test::Bencher;
 extern crate cgmath;
 use cgmath::Vector2;
-use ecs::*;
+use pyro::*;
 use rand::thread_rng;
 
 type Vec2 = Vector2<f32>;

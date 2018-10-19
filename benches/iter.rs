@@ -1,8 +1,8 @@
 #![feature(test)]
-extern crate ecs;
+extern crate pyro;
 extern crate test;
 use self::test::Bencher;
-use ecs::*;
+use pyro::*;
 
 #[derive(Debug, Copy, Clone)]
 pub struct Position {

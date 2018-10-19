@@ -1,5 +1,5 @@
 [package]
-name = "ecs"
+name = "pyro"
 version = "0.1.0"
 authors = ["maik <maikklein@googlemail.com>"]
 edition = "2018"
