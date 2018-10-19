@@ -32,8 +32,9 @@ where
                 .flat_map(|iter| iter),
         )
     }
-    pub fn add_entity<A: AppendComponents, I>(&mut self, i: I)
+    pub fn add_entity<A, I>(&mut self, i: I)
     where
+        A: AppendComponents,
         I: IntoIterator<Item = A>,
     {
         if let Some(storage) = self
@@ -43,7 +44,7 @@ where
         {
             A::append_components(i, storage);
         } else {
-            let mut storage = A::ComponentList::build::<S>().access();
+            let mut storage = <A as BuildStorage>::build::<S>().access();
             A::append_components(i, &mut storage);
             self.storages.push(storage);
         }
@@ -92,10 +93,10 @@ pub trait Storage: Sized {
     fn empty() -> EmptyStorage<Self>;
     unsafe fn component<T: Component>(&self) -> Option<&[T]>;
     unsafe fn component_mut<T: Component>(&self) -> Option<&mut [T]>;
-    fn append_components<I, A>(&mut self, components: I)
+    fn push_components<C, I>(&mut self, components: I)
     where
-        A: AppendComponents,
-        I: IntoIterator<Item = A>;
+        C: Component,
+        I: IntoIterator<Item = C>;
     fn push_component<C: Component>(&mut self, component: C);
     fn contains<C: Component>(&self) -> bool;
     fn types(&self) -> &HashSet<TypeId>;
@@ -226,21 +227,6 @@ impl_query_all!(A, B, C, D, E);
 impl_query_all!(A, B, C, D, E, F);
 impl_query_all!(A, B, C, D, E, F, G);
 
-// impl<'s, A, B> Query<'s> for All<'s, (A, B)>
-// where
-//     A: Fetch<'s>,
-//     B: Fetch<'s>,
-// {
-//     type Iter = Zip<(A::Iter, B::Iter)>;
-//     fn query<S: Storage>(storage: &'s mut S) -> Option<Self::Iter> {
-//         unsafe {
-//             let i1 = A::fetch(storage)?;
-//             let i2 = B::fetch(storage)?;
-//             Some(multizip((i1, i2)))
-//         }
-//     }
-// }
-
 pub struct EmptyStorage<S> {
     storage: S,
 }
@@ -283,10 +269,14 @@ where
     }
 }
 
+// TODO: *Unsafe* Fix multiple mutable borrows
 pub struct UnsafeStorage<T>(UnsafeCell<Vec<T>>);
 impl<T> UnsafeStorage<T> {
     pub fn new() -> Self {
         UnsafeStorage(UnsafeCell::new(Vec::<T>::new()))
+    }
+    pub unsafe fn inner_mut(&mut self) -> &mut Vec<T> {
+        unsafe { &mut (*self.0.get()) }
     }
     pub fn push(&self, t: T) {
         unsafe { (*self.0.get()).push(t) }
@@ -339,7 +329,7 @@ macro_rules! impl_append_components {
                 $ty: Component,
             )*
         {
-            type ComponentList = ($($ty,)*);
+            //type ComponentList = ($($ty,)*);
             fn is_match<S: Storage>(storage: &S) -> bool {
                 let types = storage.types();
                 let mut b = types.len() == $size;
@@ -355,17 +345,59 @@ macro_rules! impl_append_components {
                 I: IntoIterator<Item = Self>,
             {
                 #[allow(non_snake_case)]
-                for ($($ty),*) in items {
-                    $(
-                        storage.push_component($ty);
-                    )*
-                }
+                let ($($ty,)*) = Self::to_soa(items.into_iter());
+                $(
+                    storage.push_components($ty);
+                )*
+                // #[allow(non_snake_case)]
+                // for ($($ty),*) in items {
+                //     $(
+                //         storage.push_component($ty);
+                //     )*
+                // }
             }
         }
     }
 }
-pub trait AppendComponents: Sized {
-    type ComponentList: ComponentList + BuildStorage;
+
+pub trait IteratorSoa: Sized {
+    type Output;
+    fn to_soa<I: Iterator<Item = Self>>(iter: I) -> Self::Output;
+}
+macro_rules! impl_iterator_soa {
+    ( $(($item: ident, $ty: ident )),*) => {
+        impl<$($ty),*> IteratorSoa for ($($ty,)*)
+        where
+            $(
+                $ty: Component,
+            )*
+        {
+            type Output = ($(Vec<$ty>,)*);
+            fn to_soa<I: Iterator<Item = Self>>(iter: I) -> Self::Output {
+                $(
+                    let mut $ty = Vec::new();
+                )*
+                for ($($item),*) in iter {
+                    $(
+                        $ty.push($item);
+                    )*
+                }
+                ($($ty,)*)
+            }
+        }
+    }
+}
+
+impl_iterator_soa!((a, A), (b, B));
+impl_iterator_soa!((a, A), (b, B), (c, C));
+impl_iterator_soa!((a, A), (b, B), (c, C), (d, D));
+impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E));
+impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F));
+
+pub trait AppendComponents
+where
+    Self: ComponentList + BuildStorage + Sized + IteratorSoa,
+{
     fn is_match<S: Storage>(storage: &S) -> bool;
     fn append_components<I, S>(items: I, storage: &mut S)
     where
@@ -397,19 +429,25 @@ impl RegisterComponent for SoaStorage {
 }
 
 impl Storage for SoaStorage {
+    fn push_components<C, I>(&mut self, components: I)
+    where
+        C: Component,
+        I: IntoIterator<Item = C>,
+    {
+        let storage = self
+            .anymap
+            .get_mut::<UnsafeStorage<C>>()
+            .expect("Component not found");
+        unsafe {
+            storage.inner_mut().extend(components);
+        }
+    }
     fn push_component<C: Component>(&mut self, component: C) {
         let storage = self
             .anymap
             .get_mut::<UnsafeStorage<C>>()
             .expect("Component not found");
         storage.push(component);
-    }
-    fn append_components<I, A>(&mut self, components: I)
-    where
-        A: AppendComponents,
-        I: IntoIterator<Item = A>,
-    {
-        A::append_components(components, self);
     }
     fn empty() -> EmptyStorage<Self> {
         let storage = SoaStorage {
