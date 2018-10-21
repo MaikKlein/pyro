@@ -1,12 +1,14 @@
 #![feature(test)]
 extern crate pyro;
 extern crate rand;
+extern crate rayon;
 extern crate test;
 use self::test::Bencher;
 extern crate cgmath;
 use cgmath::Vector2;
 use pyro::*;
 use rand::thread_rng;
+use rayon::prelude::*;
 
 type Vec2 = Vector2<f32>;
 #[derive(Clone, Copy, Debug)]
@@ -55,9 +57,12 @@ fn integrate(world: &mut World, delta: DeltaTime) {
     use cgmath::Zero;
     let delta: f32 = delta.0;
     type IntegrateQuery = (Write<Pos>, Write<Vel>, Write<Force>, Read<InvMass>);
+    let mut count = 0;
     world
-        .matcher::<All<IntegrateQuery>>()
-        .for_each(|(pos, vel, force, inv_mass)| {
+        .matcher_with_entities::<All<IntegrateQuery>>()
+        .for_each(|(entity, (pos, vel, force, inv_mass))| {
+            count +=1;
+            println!("{:?}", entity);
             pos.0 += vel.0 * delta;
 
             let damping = (0.9f32).powf(delta);
@@ -66,6 +71,7 @@ fn integrate(world: &mut World, delta: DeltaTime) {
 
             force.0 = Vec2::zero();
         });
+    println!("{}", count);
 }
 
 fn spawn(world: &mut World) {
@@ -93,7 +99,7 @@ fn spawn(world: &mut World) {
                 let rect = Rect { a, b };
 
                 Some((
-                    inv_mass,
+                    InvMass(inv_mass),
                     Pos(spawn_pos),
                     Vel(Vec2::new(gen(), gen())),
                     Force(Vec2::zero()),
@@ -103,12 +109,12 @@ fn spawn(world: &mut World) {
             }
             _ => None,
         });
-    world.add_entity(rects);
+    world.append_components(rects);
     let balls = spawns
         .iter()
         .filter_map(|&(spawner, spawn_pos, spawn_color)| match spawner {
             Spawner::Ball { radius, inv_mass } => Some((
-                inv_mass,
+                InvMass(inv_mass),
                 Pos(spawn_pos),
                 Vel(Vec2::new(gen(), gen())),
                 Force(Vec2::zero()),
@@ -117,7 +123,7 @@ fn spawn(world: &mut World) {
             )),
             _ => None,
         });
-    world.add_entity(balls);
+    world.append_components(balls);
 }
 
 fn request_spawns(world: &mut World) {
@@ -133,9 +139,19 @@ fn request_spawns(world: &mut World) {
         });
 }
 
+use std::time::{Duration, SystemTime};
+fn measure_time<F>(mut f: F) -> Duration
+where
+    F: FnMut(),
+{
+    let start = SystemTime::now();
+    f();
+    let end = SystemTime::now();
+    end.duration_since(start).unwrap()
+}
 #[bench]
 fn iter(b: &mut Bencher) {
-    let mut world = World::<SoaStorage>::new();
+    let mut world = World::new();
     let delta = DeltaTime(0.02);
     for x in -50i32..50i32 {
         for y in -50i32..50i32 {
@@ -168,7 +184,7 @@ fn iter(b: &mut Bencher) {
                     },
                 )
             });
-            world.add_entity(e);
+            world.append_components(e);
 
             let entities = (0..4).map(|i| {
                 (
@@ -179,12 +195,15 @@ fn iter(b: &mut Bencher) {
                     color[i],
                 )
             });
-            world.add_entity(entities);
+            world.append_components(entities);
         }
     }
+    let mut iter= 0;
     b.iter(|| {
+        iter += 1;
+        integrate(&mut world, delta);
         request_spawns(&mut world);
         spawn(&mut world);
-        integrate(&mut world, delta);
     });
+    println!("{}", iter);
 }

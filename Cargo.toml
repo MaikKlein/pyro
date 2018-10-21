@@ -12,9 +12,16 @@ description = "Entity component system"
 [dependencies]
 anymap = "0.12"
 itertools = "0.7"
+rayon = "1"
 
 
 [dev-dependencies]
 cgmath = "0.16"
 rand = "0.5"
 
+[profile.bench]
+opt-level = 3
+debug=true
+[profile.release]
+opt-level = 3
+debug=true
