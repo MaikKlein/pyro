@@ -112,6 +112,7 @@ pub struct Entity {
 /// It also manages entities and allows [`Component`]s to be safely queried.
 pub struct World<S = SoaStorage> {
     entities: Vec<Vec<Entity>>,
+    component_map: Vec<Vec<ComponentId>>,
     storages: Vec<S>,
 }
 
@@ -119,6 +120,10 @@ impl<S> World<S>
 where
     S: Storage,
 {
+    /// Creates an `Iterator` over every [`Entity`] inside [`World`].
+    pub fn entities<'s>(&'s self) -> impl Iterator<Item = Entity> + 's {
+        self.entities.iter().flat_map(|inner| inner.iter().cloned())
+    }
     /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
     /// component immutable while [`Write`] will borrow the component mutable.
     /// ```rust,ignore
@@ -183,6 +188,7 @@ where
     pub fn new() -> Self {
         World {
             entities: Vec::new(),
+            component_map: Vec::new(),
             storages: Vec::new(),
         }
     }
@@ -208,6 +214,7 @@ where
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
             self.entities.push(Vec::new());
+            self.component_map.push(Vec::new());
             (id, len)
         };
         // Inserting components is not enough, we also need to create the entity ids
@@ -219,13 +226,23 @@ where
             id,
             version: 0,
         });
+        self.component_map[storage_id as usize].extend(entities.clone().map(|e| e.id));
         self.entities[storage_id as usize].extend(entities);
     }
+
     pub fn remove_entities<I>(&mut self, entities: I)
     where
         I: IntoIterator<Item = Entity>,
     {
-
+        for entity in entities {
+            let storage_id = entity.storage_id as usize;
+            // [FIXME]: This uses dynamic dispatch so we might want to batch entities
+            // together to reduce the overhead.
+            let component_id = self.component_map[storage_id][entity.id as usize];
+            let swap = self.storages[storage_id].remove(component_id);
+            // We need to keep track which entity was deleted and which was swapped.
+            self.component_map[storage_id].swap(swap, component_id as usize);
+        }
     }
 }
 pub trait Component: Send + 'static {}
@@ -522,6 +539,7 @@ macro_rules! impl_append_components {
                 $(
                     storage.push_components($ty);
                 )*
+                *storage.len_mut() += len;
                 len
             }
         }
@@ -580,8 +598,9 @@ impl RegisterComponent for SoaStorage {
 /// [`Storage`] allows to abstract over differnt types of storages. The most common storage that
 /// implements this trait is [`SoaStorage`].
 pub trait Storage: Sized {
-    fn id(&self) -> StorageId;
     fn len(&self) -> usize;
+    fn len_mut(&mut self) -> &mut usize;
+    fn id(&self) -> StorageId;
     /// Creates an [`EmptyStorage`]. This storage will not have any registered components when it
     /// is created. See [`RegisterComponent`].
     fn empty(id: StorageId) -> EmptyStorage<Self>;
@@ -599,7 +618,7 @@ pub trait Storage: Sized {
     fn contains<C: Component>(&self) -> bool;
     fn types(&self) -> &HashSet<TypeId>;
     /// Removes **all** the components at the specified index.
-    fn remove(&mut self, id: ComponentId);
+    fn remove(&mut self, id: ComponentId) -> usize;
 }
 
 impl SoaStorage {
@@ -622,16 +641,21 @@ impl SoaStorage {
 }
 
 impl Storage for SoaStorage {
-    fn remove(&mut self, id: ComponentId) {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn len_mut(&mut self) -> &mut usize {
+        &mut self.len
+    }
+    fn remove(&mut self, id: ComponentId) -> usize {
         self.storages.values_mut().for_each(|storage| {
             storage.remove(id);
         });
+        self.len -= 1;
+        self.len
     }
     fn id(&self) -> StorageId {
         self.id
-    }
-    fn len(&self) -> usize {
-        self.len
     }
     fn push_components<C, I>(&mut self, components: I)
     where
