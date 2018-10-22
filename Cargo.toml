@@ -10,9 +10,9 @@ documentation = "https://docs.rs/pyro"
 description = "Entity component system"
 
 [dependencies]
-anymap = "0.12"
 itertools = "0.7"
 rayon = "1"
+downcast-rs = "1.0"
 
 
 [dev-dependencies]

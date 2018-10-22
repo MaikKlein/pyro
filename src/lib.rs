@@ -80,10 +80,11 @@
 //!
 //! # Getting started
 //!
-extern crate anymap;
 extern crate itertools;
-pub extern crate rayon;
-use anymap::{any::CloneAny, Map};
+#[macro_use]
+extern crate downcast_rs;
+extern crate rayon;
+use downcast_rs::Downcast;
 use itertools::{multizip, Zip};
 use rayon::prelude::*;
 use std::any::TypeId;
@@ -91,14 +92,25 @@ use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 
+pub type StorageId = u16;
+pub type ComponentId = u32;
+
+/// `Entitiy` serves as an ID to lookup components for entities which can be in
+/// different storages.
+// [TODO]: Make `Entity` generic.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Entity {
+    /// Removing entities will increment the versioning. Accessing an entitiy with an
+    /// out dated version will result in a `panic`.
     version: u16,
+    /// The id of the storage where the entitiy lives in
     storage_id: StorageId,
+    /// The actual id inside a storage
     id: ComponentId,
 }
 
 pub struct World<S = SoaStorage> {
+    entities: Vec<Vec<Entity>>,
     storages: Vec<S>,
 }
 
@@ -108,39 +120,45 @@ where
 {
     pub fn matcher_with_entities<'s, Q>(
         &'s mut self,
-    ) -> impl Iterator<Item = (&'s Entity, <<Q as Query<'s>>::Iter as Iterator>::Item)> + 's
+    ) -> impl Iterator<Item = (Entity, <<Q as Query<'s>>::Iter as Iterator>::Item)> + 's
     where
-        Q: Query<'s>,
-        S: EntityIter<'s>,
+        Q: Query<'s> + Matcher,
     {
+        let entities = &self.entities;
         self.storages
             .iter()
-            .filter_map(|storage| unsafe {
-                let query = Q::query(storage)?;
-                Some(storage.entity_iter().zip(query))
+            .enumerate()
+            .filter(|&(_, storage)| Q::is_match(storage))
+            // [FIXME] Honestly I am not sure why need to move the borrow from outside
+            // into the closure. We get lifetime error for self otherwise, which is odd.
+            .map(move |(storage_id, storage)| unsafe {
+                let query = Q::query(storage);
+                entities[storage_id].iter().cloned().zip(query)
             }).flat_map(|iter| iter)
-    }
-}
-impl<S> World<S>
-where
-    S: Storage + RegisterComponent + Clone,
-{
-    pub fn new() -> Self {
-        World {
-            storages: Vec::new(),
-        }
     }
     pub fn matcher<'s, Q>(
         &'s mut self,
     ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
     where
-        Q: Query<'s>,
+        Q: Query<'s> + Matcher,
     {
         unsafe {
             self.storages
-                .iter_mut()
-                .filter_map(|storage| Q::query(storage))
+                .iter()
+                .filter(|&storage| Q::is_match(storage))
+                .map(|storage| Q::query(storage))
                 .flat_map(|iter| iter)
+        }
+    }
+}
+impl<S> World<S>
+where
+    S: Storage + RegisterComponent,
+{
+    pub fn new() -> Self {
+        World {
+            entities: Vec::new(),
+            storages: Vec::new(),
         }
     }
     pub fn append_components<A, I>(&mut self, i: I)
@@ -148,25 +166,44 @@ where
         A: AppendComponents + BuildStorage,
         I: IntoIterator<Item = A>,
     {
-        if let Some(storage) = self
+        // Try to find a matching storage, and insert the components
+        let (storage_id, insert_count) = if let Some(storage) = self
             .storages
             .iter_mut()
             .find(|storage| A::is_match::<S>(storage))
         {
-            A::append_components(i, storage);
+            let len = A::append_components(i, storage);
+            (storage.id(), len)
         } else {
+            // if we did not find a storage, we need to create one
             let id = self.storages.len() as StorageId;
             let mut storage = <A as BuildStorage>::build::<S>(id).access();
-            A::append_components(i, &mut storage);
+            let len = A::append_components(i, &mut storage);
             self.storages.push(storage);
-        }
+            // Also we need to add an entity Vec for that storage
+            self.entities.push(Vec::new());
+            (id, len)
+        };
+        // Inserting components is not enough, we also need to create the entity ids
+        // for those components.
+        let start_len = self.entities[storage_id as usize].len() as u32;
+        let end_len = start_len + insert_count as u32;
+        let entities = (start_len..end_len).map(|id| Entity {
+            storage_id: storage_id,
+            id,
+            version: 0,
+        });
+        self.entities[storage_id as usize].extend(entities);
+    }
+    pub fn remove_entities<I>(&mut self, entities: I)
+    where
+        I: IntoIterator<Item = Entity>,
+    {
+
     }
 }
 pub trait Component: Send + 'static {}
 impl<C: 'static + Send> Component for C {}
-
-pub type StorageId = u16;
-pub type ComponentId = u32;
 
 pub struct StorageBuilder<S: Storage> {
     current_id: ComponentId,
@@ -241,22 +278,22 @@ pub struct Write<C>(PhantomData<C>);
 pub trait Fetch<'s> {
     type Component: Component;
     type Iter: Iterator + 's;
-    unsafe fn fetch<S: Storage>(storage: &'s S) -> Option<Self::Iter>;
+    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
 impl<'s, C: Component> Fetch<'s> for Read<C> {
     type Component = C;
     type Iter = std::slice::Iter<'s, C>;
-    unsafe fn fetch<S: Storage>(storage: &'s S) -> Option<Self::Iter> {
-        storage.component::<C>().map(|slice| slice.iter())
+    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
+        storage.component::<C>().iter()
     }
 }
 
 impl<'s, C: Component> Fetch<'s> for Write<C> {
     type Component = C;
     type Iter = std::slice::IterMut<'s, C>;
-    unsafe fn fetch<S: Storage>(storage: &'s S) -> Option<Self::Iter> {
-        storage.component_mut::<C>().map(|slice| slice.iter_mut())
+    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
+        storage.component_mut::<C>().iter_mut()
     }
 }
 
@@ -265,26 +302,49 @@ pub trait Matcher {
 }
 pub trait Query<'s> {
     type Iter: Iterator + 's;
-    unsafe fn query<S: Storage>(storage: &'s S) -> Option<Self::Iter>;
+    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
 pub struct All<'s, Tuple>(pub PhantomData<&'s Tuple>);
-impl<'s, A, B> Matcher for All<'s, (A, B)>
-where
-    A: Fetch<'s>,
-    B: Fetch<'s>,
-{
-    fn is_match<S: Storage>(storage: &S) -> bool {
-        storage.contains::<A::Component>() && storage.contains::<B::Component>()
+// impl<'s, A, B> Matcher for All<'s, (A, B)>
+// where
+//     A: Fetch<'s>,
+//     B: Fetch<'s>,
+// {
+//     fn is_match<S: Storage>(storage: &S) -> bool {
+//         storage.contains::<A::Component>() && storage.contains::<B::Component>()
+//     }
+// }
+macro_rules! impl_matcher_all{
+    ($($ty: ident),*) => {
+        impl<'s, $($ty,)*> Matcher for All<'s, ($($ty,)*)>
+        where
+            $(
+                $ty: Fetch<'s>,
+            )*
+        {
+            fn is_match<S: Storage>(storage: &S) -> bool {
+                $(
+                    storage.contains::<$ty::Component>()
+                )&&*
+            }
+        }
     }
 }
+
+impl_matcher_all!(A, B);
+impl_matcher_all!(A, B, C);
+impl_matcher_all!(A, B, C, D);
+impl_matcher_all!(A, B, C, D, E);
+impl_matcher_all!(A, B, C, D, E, F);
+impl_matcher_all!(A, B, C, D, E, F, G);
 
 impl<'s, A> Query<'s> for All<'s, A>
 where
     A: Fetch<'s>,
 {
     type Iter = A::Iter;
-    unsafe fn query<S: Storage>(storage: &'s S) -> Option<Self::Iter> {
+    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
         A::fetch(storage)
     }
 }
@@ -298,8 +358,8 @@ macro_rules! impl_query_all{
             )*
         {
             type Iter = Zip<($($ty::Iter,)*)>;
-            unsafe fn query<S: Storage>(storage: &'s S) -> Option<Self::Iter> {
-                Some(multizip(($($ty::fetch(storage)?,)*)))
+            unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
+                multizip(($($ty::fetch(storage),)*))
             }
         }
     }
@@ -317,7 +377,7 @@ pub struct EmptyStorage<S> {
 }
 
 pub trait BuildStorage {
-    fn build<S: Storage + Clone + RegisterComponent>(id: StorageId) -> EmptyStorage<S>;
+    fn build<S: Storage + RegisterComponent>(id: StorageId) -> EmptyStorage<S>;
 }
 
 macro_rules! impl_build_storage {
@@ -328,8 +388,12 @@ macro_rules! impl_build_storage {
                 $ty:Component,
             )*
         {
-            fn build<S: Storage + Clone + RegisterComponent>(id: StorageId) -> EmptyStorage<S> {
-                S::empty(id)$(.register_component::<$ty>())*
+            fn build<S: Storage + RegisterComponent>(id: StorageId) -> EmptyStorage<S> {
+                let mut empty = S::empty(id);
+                $(
+                    empty.register_component::<$ty>();
+                )*
+                empty
             }
         }
     }
@@ -342,18 +406,34 @@ impl_build_storage!(A, B, C, D, E, F);
 
 impl<S> EmptyStorage<S>
 where
-    S: Storage + Clone + RegisterComponent,
+    S: Storage + RegisterComponent,
 {
-    pub fn register_component<C: Component>(&self) -> EmptyStorage<S> {
-        let mut storage = self.storage.clone();
-        storage.register_component::<C>();
-        EmptyStorage { storage }
+    pub fn register_component<C: Component>(&mut self) {
+        self.storage.register_component::<C>();
     }
     pub fn access(self) -> S {
         self.storage
     }
 }
 
+pub trait RuntimeStorage: Downcast {
+    fn remove(&mut self, id: ComponentId);
+}
+
+impl_downcast!(RuntimeStorage);
+impl RuntimeStorage {
+    pub fn as_unsafe_storage<C: Component>(&self) -> &UnsafeStorage<C> {
+        self.downcast_ref::<UnsafeStorage<C>>()
+            .expect("Incorrect storage type")
+    }
+    pub fn as_unsafe_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C> {
+        self.downcast_mut::<UnsafeStorage<C>>()
+            .expect("Incorrect storage type")
+    }
+}
+impl<T: Component> RuntimeStorage for UnsafeStorage<T> {
+    fn remove(&mut self, id: ComponentId) {}
+}
 // TODO: *Unsafe* Fix multiple mutable borrows
 pub struct UnsafeStorage<T>(UnsafeCell<Vec<T>>);
 impl<T> UnsafeStorage<T> {
@@ -446,7 +526,7 @@ where
     Self: ComponentList + IteratorSoa,
 {
     fn is_match<S: Storage>(storage: &S) -> bool;
-    fn append_components<I, S>(items: I, storage: &mut S)
+    fn append_components<I, S>(items: I, storage: &mut S) -> usize
     where
         S: Storage,
         I: IntoIterator<Item = Self>;
@@ -460,7 +540,6 @@ macro_rules! impl_append_components {
                 $ty: Component,
             )*
         {
-            //type ComponentList = ($($ty,)*);
             fn is_match<S: Storage>(storage: &S) -> bool {
                 let types = storage.types();
                 let mut b = types.len() == $size;
@@ -470,19 +549,19 @@ macro_rules! impl_append_components {
                 b
             }
 
-            fn append_components<I, S>(items: I, storage: &mut S)
+            fn append_components<I, S>(items: I, storage: &mut S) -> usize
             where
                 S: Storage,
                 I: IntoIterator<Item = Self>,
             {
                 let tuple = Self::to_soa(items.into_iter());
-                let insert_len = tuple.0.len();
+                let len = tuple.0.len();
                 #[allow(non_snake_case)]
                 let ($($ty,)*) = tuple;
                 $(
                     storage.push_components($ty);
                 )*
-                storage.create_entities(insert_len as u32);
+                len
             }
         }
     }
@@ -494,13 +573,11 @@ impl_append_components!(4 => A, B, C, D);
 impl_append_components!(5 => A, B, C, D, E);
 impl_append_components!(6 => A, B, C, D, E, F);
 
-#[derive(Clone)]
 pub struct SoaStorage {
     len: usize,
     id: StorageId,
-    entities: Vec<Entity>,
     types: HashSet<TypeId>,
-    anymap: Map<CloneAny>,
+    storages: HashMap<TypeId, Box<RuntimeStorage>>,
 }
 
 pub trait RegisterComponent {
@@ -509,30 +586,32 @@ pub trait RegisterComponent {
 
 impl RegisterComponent for SoaStorage {
     fn register_component<C: Component>(&mut self) {
-        self.types.insert(TypeId::of::<C>());
-        self.anymap.insert(UnsafeStorage::<C>::new());
+        let type_id = TypeId::of::<C>();
+        self.types.insert(type_id);
+        self.storages
+            .insert(type_id, Box::new(UnsafeStorage::<C>::new()));
     }
 }
 
-pub trait EntityIter<'a> {
-    type Iter: Iterator<Item = &'a Entity> + 'a;
-    fn entity_iter(&'a self) -> Self::Iter;
-}
+// pub trait EntityIter<'a> {
+//     type Iter: Iterator<Item = &'a Entity> + 'a;
+//     fn entity_iter(&'a self) -> Self::Iter;
+// }
 
-impl<'a> EntityIter<'a> for SoaStorage {
-    type Iter = std::slice::Iter<'a, Entity>;
-    fn entity_iter(&'a self) -> Self::Iter {
-        self.entities.iter()
-    }
-}
+// impl<'a> EntityIter<'a> for SoaStorage {
+//     type Iter = std::slice::Iter<'a, Entity>;
+//     fn entity_iter(&'a self) -> Self::Iter {
+//         self.entities.iter()
+//     }
+// }
 
 pub trait Storage: Sized {
-    fn create_entities(&mut self, count: u32);
+    //fn create_entities(&mut self, count: u32);
     fn id(&self) -> StorageId;
     fn len(&self) -> usize;
     fn empty(id: StorageId) -> EmptyStorage<Self>;
-    unsafe fn component<T: Component>(&self) -> Option<&[T]>;
-    unsafe fn component_mut<T: Component>(&self) -> Option<&mut [T]>;
+    unsafe fn component<C: Component>(&self) -> &[C];
+    unsafe fn component_mut<C: Component>(&self) -> &mut [C];
     fn push_components<C, I>(&mut self, components: I)
     where
         C: Component,
@@ -540,9 +619,34 @@ pub trait Storage: Sized {
     fn push_component<C: Component>(&mut self, component: C);
     fn contains<C: Component>(&self) -> bool;
     fn types(&self) -> &HashSet<TypeId>;
+    fn remove(&mut self, id: ComponentId);
 }
 
+impl SoaStorage {
+    fn get_storage<C: Component>(&self) -> &UnsafeStorage<C> {
+        let runtime_storage = self
+            .storages
+            .get(&TypeId::of::<C>())
+            .expect("Unknown storage");
+        runtime_storage.as_unsafe_storage::<C>()
+    }
+    fn get_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C> {
+        let runtime_storage = self
+            .storages
+            .get_mut(&TypeId::of::<C>())
+            .expect("Unknown storage");
+        runtime_storage.as_unsafe_storage_mut::<C>()
+    }
+}
 impl Storage for SoaStorage {
+    fn remove(&mut self, id: ComponentId) {
+        self.types().iter().for_each(|type_id| {
+            // let storage = self
+            //     .anymap
+            //     .get_mut::<UnsafeStorage<C>>()
+            //     .expect("Component not found");
+        });
+    }
     fn id(&self) -> StorageId {
         self.id
     }
@@ -554,60 +658,35 @@ impl Storage for SoaStorage {
         C: Component,
         I: IntoIterator<Item = C>,
     {
-        let storage = self
-            .anymap
-            .get_mut::<UnsafeStorage<C>>()
-            .expect("Component not found");
         unsafe {
-            storage.inner_mut().extend(components);
+            self.get_storage_mut::<C>().inner_mut().extend(components);
         }
     }
     fn push_component<C: Component>(&mut self, component: C) {
-        let storage = self
-            .anymap
-            .get_mut::<UnsafeStorage<C>>()
-            .expect("Component not found");
-        storage.push(component);
+        self.get_storage::<C>().push(component);
     }
     fn empty(id: StorageId) -> EmptyStorage<Self> {
         let storage = SoaStorage {
             types: HashSet::new(),
-            anymap: Map::new(),
-            entities: Vec::new(),
+            storages: HashMap::new(),
             id,
             len: 0,
         };
         EmptyStorage { storage }
     }
-    unsafe fn component_mut<T: Component>(&self) -> Option<&mut [T]> {
-        self.anymap
-            .get::<UnsafeStorage<T>>()
-            .map(|vec| vec.get_mut_slice())
+    unsafe fn component_mut<C: Component>(&self) -> &mut [C] {
+        self.get_storage::<C>().get_mut_slice()
     }
-    unsafe fn component<T: Component>(&self) -> Option<&[T]> {
-        self.anymap
-            .get::<UnsafeStorage<T>>()
-            .map(|vec| vec.get_slice())
+    unsafe fn component<C: Component>(&self) -> &[C] {
+        self.get_storage::<C>().get_slice()
     }
 
     fn contains<C: Component>(&self) -> bool {
-        self.anymap.contains::<UnsafeStorage<C>>()
+        self.types.contains(&TypeId::of::<C>())
     }
 
     fn types(&self) -> &HashSet<TypeId> {
         &self.types
-    }
-
-    fn create_entities(&mut self, count: u32) {
-        let start_len = self.len() as u32;
-        let end_len = start_len + count;
-        let storage_id = self.id;
-        let entities = (start_len..end_len).map(|id| Entity {
-            storage_id,
-            id,
-            version: 0,
-        });
-        self.entities.extend(entities);
     }
 }
 // TODO: Implement a parallel multizip
