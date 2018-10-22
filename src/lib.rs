@@ -86,7 +86,6 @@ extern crate downcast_rs;
 extern crate rayon;
 use downcast_rs::Downcast;
 use itertools::{multizip, Zip};
-use rayon::prelude::*;
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
@@ -236,7 +235,7 @@ impl<C: 'static + Send> Component for C {}
 pub struct Read<C>(PhantomData<C>);
 /// Implements [`Fetch`] and allows components to be borrowed mutable.
 pub struct Write<C>(PhantomData<C>);
-/// A helper trait that works in lockstep with [`Read`] and [`Write`] to borrows components either
+/// A helper trait that works in lockstep with [`Read`] and [`Write`] to borrow components either
 /// mutable or immutable.
 pub trait Fetch<'s> {
     type Component: Component;
@@ -409,30 +408,23 @@ impl<T> UnsafeStorage<T> {
     pub fn new() -> Self {
         UnsafeStorage(UnsafeCell::new(Vec::<T>::new()))
     }
-    pub unsafe fn inner_mut(&mut self) -> &mut Vec<T> {
+    pub unsafe fn inner_mut(&self) -> &mut Vec<T> {
         &mut (*self.0.get())
     }
-    pub fn push(&self, t: T) {
-        unsafe { (*self.0.get()).push(t) }
-    }
-    pub fn is_empty(&self) -> bool {
-        unsafe { (*self.0.get()).is_empty() }
-    }
+    // pub fn push(&self, t: T) {
+    //     unsafe { (*self.0.get()).push(t) }
+    // }
+    // pub fn is_empty(&self) -> bool {
+    //     unsafe { (*self.0.get()).is_empty() }
+    // }
 
-    pub unsafe fn get_slice(&self) -> &[T] {
-        (*self.0.get()).as_slice()
-    }
+    // pub unsafe fn get_slice(&self) -> &[T] {
+    //     (*self.0.get()).as_slice()
+    // }
 
-    pub unsafe fn get_mut_slice(&self) -> &mut [T] {
-        (*self.0.get()).as_mut_slice()
-    }
-}
-
-impl<T> Clone for UnsafeStorage<T> {
-    fn clone(&self) -> Self {
-        assert!(self.is_empty());
-        UnsafeStorage::new()
-    }
+    // pub unsafe fn get_mut_slice(&self) -> &mut [T] {
+    //     (*self.0.get()).as_mut_slice()
+    // }
 }
 
 pub trait ComponentList: Sized {
@@ -651,7 +643,9 @@ impl Storage for SoaStorage {
         }
     }
     fn push_component<C: Component>(&mut self, component: C) {
-        self.get_storage::<C>().push(component);
+        unsafe {
+            self.get_storage::<C>().inner_mut().push(component);
+        }
     }
     fn empty(id: StorageId) -> EmptyStorage<Self> {
         let storage = SoaStorage {
@@ -663,10 +657,10 @@ impl Storage for SoaStorage {
         EmptyStorage { storage }
     }
     unsafe fn component_mut<C: Component>(&self) -> &mut [C] {
-        self.get_storage::<C>().get_mut_slice()
+        self.get_storage::<C>().inner_mut().as_mut_slice()
     }
     unsafe fn component<C: Component>(&self) -> &[C] {
-        self.get_storage::<C>().get_slice()
+        self.get_storage::<C>().inner_mut().as_slice()
     }
 
     fn contains<C: Component>(&self) -> bool {
