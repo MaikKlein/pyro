@@ -95,13 +95,13 @@ use std::marker::PhantomData;
 pub type StorageId = u16;
 pub type ComponentId = u32;
 
-/// `Entitiy` serves as an ID to lookup components for entities which can be in
+/// Serves as an ID to lookup components for entities which can be in
 /// different storages.
 // [TODO]: Make `Entity` generic.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Entity {
     /// Removing entities will increment the versioning. Accessing an entitiy with an
-    /// out dated version will result in a `panic`.
+    /// outdated version will result in a `panic`. `version` does wrap on overflow.
     version: u16,
     /// The id of the storage where the entitiy lives in
     storage_id: StorageId,
@@ -109,6 +109,8 @@ pub struct Entity {
     id: ComponentId,
 }
 
+/// [`World`] is the heart of this library. It owns all the [`Component`]s and [`Storage`]s.
+/// It also manages entities and allows [`Component`]s to be safely queried.
 pub struct World<S = SoaStorage> {
     entities: Vec<Vec<Entity>>,
     storages: Vec<S>,
@@ -118,6 +120,43 @@ impl<S> World<S>
 where
     S: Storage,
 {
+    /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
+    /// component immutable while [`Write`] will borrow the component mutable.
+    /// ```rust,ignore
+    /// fn update(world: &mut World) {
+    ///    world
+    ///        .matcher::<All<(Write<Position>, Read<Velocity>)>>()
+    ///        .for_each(|(p, v)| {
+    ///            p.x += v.dx;
+    ///            p.y += v.dy;
+    ///        });
+    /// }
+    /// ```
+    pub fn matcher<'s, Q>(
+        &'s mut self,
+    ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
+    where
+        Q: Query<'s> + Matcher,
+    {
+        unsafe {
+            self.storages
+                .iter()
+                .filter(|&storage| Q::is_match(storage))
+                .map(|storage| Q::query(storage))
+                .flat_map(|iter| iter)
+        }
+    }
+    /// Same as [`World::matcher`] but also returns the corresponding [`Entity`].
+    /// ```rust,ignore
+    /// fn update(world: &mut World) {
+    ///    world
+    ///        .matcher_with_entities::<All<(Write<Position>, Read<Velocity>)>>()
+    ///        .for_each(|(entity, (p, v))| {
+    ///            p.x += v.dx;
+    ///            p.y += v.dy;
+    ///        });
+    /// }
+    /// ```
     pub fn matcher_with_entities<'s, Q>(
         &'s mut self,
     ) -> impl Iterator<Item = (Entity, <<Q as Query<'s>>::Iter as Iterator>::Item)> + 's
@@ -136,31 +175,19 @@ where
                 entities[storage_id].iter().cloned().zip(query)
             }).flat_map(|iter| iter)
     }
-    pub fn matcher<'s, Q>(
-        &'s mut self,
-    ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
-    where
-        Q: Query<'s> + Matcher,
-    {
-        unsafe {
-            self.storages
-                .iter()
-                .filter(|&storage| Q::is_match(storage))
-                .map(|storage| Q::query(storage))
-                .flat_map(|iter| iter)
-        }
-    }
 }
 impl<S> World<S>
 where
     S: Storage + RegisterComponent,
 {
+    /// Creates an empty [`World`].
     pub fn new() -> Self {
         World {
             entities: Vec::new(),
             storages: Vec::new(),
         }
     }
+    /// Appends the components and also creates the necessary [`Entity`]s behind the scenes.
     pub fn append_components<A, I>(&mut self, i: I)
     where
         A: AppendComponents + BuildStorage,
@@ -205,76 +232,12 @@ where
 pub trait Component: Send + 'static {}
 impl<C: 'static + Send> Component for C {}
 
-pub struct StorageBuilder<S: Storage> {
-    current_id: ComponentId,
-    storage_register: HashMap<ComponentId, S>,
-}
-
-impl<S> StorageBuilder<S>
-where
-    S: Storage,
-{
-    pub fn new() -> Self {
-        StorageBuilder {
-            current_id: 0,
-            storage_register: HashMap::new(),
-        }
-    }
-
-    pub fn add_storage(&mut self, storage: S) -> ComponentId {
-        let id = self.current_id + 1;
-        self.storage_register.insert(id, storage);
-        self.current_id = id;
-        id
-    }
-
-    // pub fn extent_from_storage<C: Component>(&mut self, id: ComponentId) -> S {
-    //     let mut s = self
-    //         .storage_register
-    //         .get(&id)
-    //         .expect("Id not found")
-    //         .clone();
-    //     s.register_component::<C>();
-    //     s
-    // }
-}
-
-pub struct Exact<'s, Tuple>(pub PhantomData<&'s Tuple>);
-
-impl<'s, A, B> Matcher for Exact<'s, (A, B)>
-where
-    A: Fetch<'s>,
-    B: Fetch<'s>,
-{
-    fn is_match<S: Storage>(storage: &S) -> bool {
-        let types = storage.types();
-        types.len() == 2
-            && types.contains(&TypeId::of::<A::Component>())
-            && types.contains(&TypeId::of::<B::Component>())
-    }
-}
-
-pub trait ReadComponent {
-    type Component: Component;
-}
-pub trait WriteComponent {
-    type Component: Component;
-}
+/// Implements [`Fetch`] and allows components to be borrowed immutable.
 pub struct Read<C>(PhantomData<C>);
-impl<C: Component> ReadComponent for Read<C> {
-    type Component = C;
-}
-
-impl<C> Read<C> {
-    pub fn new() -> Self {
-        Read(PhantomData)
-    }
-}
-impl<C: Component> WriteComponent for Write<C> {
-    type Component = C;
-}
-
+/// Implements [`Fetch`] and allows components to be borrowed mutable.
 pub struct Write<C>(PhantomData<C>);
+/// A helper trait that works in lockstep with [`Read`] and [`Write`] to borrows components either
+/// mutable or immutable.
 pub trait Fetch<'s> {
     type Component: Component;
     type Iter: Iterator + 's;
@@ -297,24 +260,22 @@ impl<'s, C: Component> Fetch<'s> for Write<C> {
     }
 }
 
+/// Allows to match over different [`Storage`]s. See also [`All`].
 pub trait Matcher {
     fn is_match<S: Storage>(storage: &S) -> bool;
 }
+/// Allows to query multiple components from a [`Storage`]. See also [`All`].
 pub trait Query<'s> {
     type Iter: Iterator + 's;
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
+/// Is satisfied when a storages contains all of the specified components.
+/// ```rust,ingore
+/// type Query = All<(Write<Position>, Read<Velocity>)>;
+/// ```
 pub struct All<'s, Tuple>(pub PhantomData<&'s Tuple>);
-// impl<'s, A, B> Matcher for All<'s, (A, B)>
-// where
-//     A: Fetch<'s>,
-//     B: Fetch<'s>,
-// {
-//     fn is_match<S: Storage>(storage: &S) -> bool {
-//         storage.contains::<A::Component>() && storage.contains::<B::Component>()
-//     }
-// }
+
 macro_rules! impl_matcher_all{
     ($($ty: ident),*) => {
         impl<'s, $($ty,)*> Matcher for All<'s, ($($ty,)*)>
@@ -376,6 +337,8 @@ pub struct EmptyStorage<S> {
     storage: S,
 }
 
+/// [`BuildStorage`] is used to create different [`Storage`]s at runtime. See also
+/// [`AppendComponents`] and [`World::append_components`]
 pub trait BuildStorage {
     fn build<S: Storage + RegisterComponent>(id: StorageId) -> EmptyStorage<S>;
 }
@@ -431,10 +394,16 @@ impl RuntimeStorage {
             .expect("Incorrect storage type")
     }
 }
+
 impl<T: Component> RuntimeStorage for UnsafeStorage<T> {
-    fn remove(&mut self, id: ComponentId) {}
+    fn remove(&mut self, id: ComponentId) {
+        unsafe {
+            self.inner_mut().swap_remove(id as usize);
+        }
+    }
 }
-// TODO: *Unsafe* Fix multiple mutable borrows
+
+// FIXME: *Unsafe* Fix multiple mutable borrows. Should be fixed in the `Query` API.
 pub struct UnsafeStorage<T>(UnsafeCell<Vec<T>>);
 impl<T> UnsafeStorage<T> {
     pub fn new() -> Self {
@@ -573,6 +542,26 @@ impl_append_components!(4 => A, B, C, D);
 impl_append_components!(5 => A, B, C, D, E);
 impl_append_components!(6 => A, B, C, D, E, F);
 
+/// A runtime SoA storage. It stands for **S**tructure **o**f **A**rrays.
+///
+/// ```rust,ignore
+/// struct Test {
+///     foo: Foo,
+///     bar: Bar,
+///     baz: Baz,
+/// }
+/// let test: Vec<Test> = ...; // Array of Structs (*AoS*) layout
+///
+/// struct Test {
+///     foo: Vec<Foo>,
+///     bar: Vec<Bar>,
+///     baz: Vec<Baz>,
+/// }
+/// let test: Test = ...; // SoA layout
+/// ```
+/// Users do not interact with this storage directly, instead [`World`] will use this storage
+/// behind the scenes. In the future there will be other storages such as *AoSoA*, which is a fancy
+/// way of saying *SoA* but with arrays that a limited to a size of `8`.
 pub struct SoaStorage {
     len: usize,
     id: StorageId,
@@ -580,12 +569,15 @@ pub struct SoaStorage {
     storages: HashMap<TypeId, Box<RuntimeStorage>>,
 }
 
+/// A [`Storage`] won't have any arrays or vectors when it is created. [`RegisterComponent`] can
+/// register or add those component arrays. See also [`EmptyStorage::register_component`]
 pub trait RegisterComponent {
     fn register_component<C: Component>(&mut self);
 }
 
 impl RegisterComponent for SoaStorage {
     fn register_component<C: Component>(&mut self) {
+        // A `SoAStorage` is backed by `UnsafeStorage`.
         let type_id = TypeId::of::<C>();
         self.types.insert(type_id);
         self.storages
@@ -593,36 +585,33 @@ impl RegisterComponent for SoaStorage {
     }
 }
 
-// pub trait EntityIter<'a> {
-//     type Iter: Iterator<Item = &'a Entity> + 'a;
-//     fn entity_iter(&'a self) -> Self::Iter;
-// }
-
-// impl<'a> EntityIter<'a> for SoaStorage {
-//     type Iter = std::slice::Iter<'a, Entity>;
-//     fn entity_iter(&'a self) -> Self::Iter {
-//         self.entities.iter()
-//     }
-// }
-
+/// [`Storage`] allows to abstract over differnt types of storages. The most common storage that
+/// implements this trait is [`SoaStorage`].
 pub trait Storage: Sized {
-    //fn create_entities(&mut self, count: u32);
     fn id(&self) -> StorageId;
     fn len(&self) -> usize;
+    /// Creates an [`EmptyStorage`]. This storage will not have any registered components when it
+    /// is created. See [`RegisterComponent`].
     fn empty(id: StorageId) -> EmptyStorage<Self>;
+    /// Retrieves the component array and panics if `C` is not inside this storage.
     unsafe fn component<C: Component>(&self) -> &[C];
+    /// Same as [`Storage::component`] but mutable.
     unsafe fn component_mut<C: Component>(&self) -> &mut [C];
+    /// Appends components to one array. See [`AppendComponents`] that uses this method.
     fn push_components<C, I>(&mut self, components: I)
     where
         C: Component,
         I: IntoIterator<Item = C>;
     fn push_component<C: Component>(&mut self, component: C);
+    /// Returns true if the [`Storage`] has an array of type `C`.
     fn contains<C: Component>(&self) -> bool;
     fn types(&self) -> &HashSet<TypeId>;
+    /// Removes **all** the components at the specified index.
     fn remove(&mut self, id: ComponentId);
 }
 
 impl SoaStorage {
+    /// Convinence method to easily access an [`UnsafeStorage`].
     fn get_storage<C: Component>(&self) -> &UnsafeStorage<C> {
         let runtime_storage = self
             .storages
@@ -630,6 +619,7 @@ impl SoaStorage {
             .expect("Unknown storage");
         runtime_storage.as_unsafe_storage::<C>()
     }
+    /// Same as [`SoaStorage::get_storage`] but mutable.
     fn get_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C> {
         let runtime_storage = self
             .storages
@@ -638,13 +628,11 @@ impl SoaStorage {
         runtime_storage.as_unsafe_storage_mut::<C>()
     }
 }
+
 impl Storage for SoaStorage {
     fn remove(&mut self, id: ComponentId) {
-        self.types().iter().for_each(|type_id| {
-            // let storage = self
-            //     .anymap
-            //     .get_mut::<UnsafeStorage<C>>()
-            //     .expect("Component not found");
+        self.storages.values_mut().for_each(|storage| {
+            storage.remove(id);
         });
     }
     fn id(&self) -> StorageId {
@@ -689,141 +677,3 @@ impl Storage for SoaStorage {
         &self.types
     }
 }
-// TODO: Implement a parallel multizip
-// use rayon::iter::plumbing::{bridge, Consumer, Producer, ProducerCallback, UnindexedConsumer};
-// use std::cmp;
-// #[derive(Debug, Clone)]
-// pub struct MultiZip<Tuple> {
-//     tuple: Tuple,
-// }
-// pub fn new<A, B>(a: A, b: B) -> MultiZip<(A, B)>
-// where
-//     A: IndexedParallelIterator,
-//     B: IndexedParallelIterator,
-// {
-//     MultiZip { tuple: (a, b) }
-// }
-
-// impl<A, B> ParallelIterator for MultiZip<(A, B)>
-// where
-//     A: IndexedParallelIterator,
-//     B: IndexedParallelIterator,
-// {
-//     type Item = (A::Item, B::Item);
-
-//     fn drive_unindexed<C>(self, consumer: C) -> C::Result
-//     where
-//         C: UnindexedConsumer<Self::Item>,
-//     {
-//         bridge(self, consumer)
-//     }
-
-//     fn opt_len(&self) -> Option<usize> {
-//         Some(self.len())
-//     }
-// }
-// impl<A, B> IndexedParallelIterator for MultiZip<(A, B)>
-// where
-//     A: IndexedParallelIterator,
-//     B: IndexedParallelIterator,
-// {
-//     fn drive<C>(self, consumer: C) -> C::Result
-//     where
-//         C: Consumer<Self::Item>,
-//     {
-//         bridge(self, consumer)
-//     }
-
-//     fn len(&self) -> usize {
-//         cmp::min(self.tuple.0.len(), self.tuple.1.len())
-//     }
-
-//     fn with_producer<CB>(self, callback: CB) -> CB::Output
-//     where
-//         CB: ProducerCallback<Self::Item>,
-//     {
-//         return self.tuple.0.with_producer(CallbackA {
-//             callback: callback,
-//             b: self.tuple.1,
-//         });
-
-//         struct CallbackA<CB, B> {
-//             callback: CB,
-//             b: B,
-//         }
-
-//         impl<CB, ITEM, B> ProducerCallback<ITEM> for CallbackA<CB, B>
-//         where
-//             B: IndexedParallelIterator,
-//             CB: ProducerCallback<(ITEM, B::Item)>,
-//         {
-//             type Output = CB::Output;
-
-//             fn callback<A>(self, a_producer: A) -> Self::Output
-//             where
-//                 A: Producer<Item = ITEM>,
-//             {
-//                 return self.b.with_producer(CallbackB {
-//                     a_producer: a_producer,
-//                     callback: self.callback,
-//                 });
-//             }
-//         }
-
-//         struct CallbackB<CB, A> {
-//             a_producer: A,
-//             callback: CB,
-//         }
-
-//         impl<CB, A, ITEM> ProducerCallback<ITEM> for CallbackB<CB, A>
-//         where
-//             A: Producer,
-//             CB: ProducerCallback<(A::Item, ITEM)>,
-//         {
-//             type Output = CB::Output;
-
-//             fn callback<B>(self, b_producer: B) -> Self::Output
-//             where
-//                 B: Producer<Item = ITEM>,
-//             {
-//                 self.callback.callback(MultiZipProducer {
-//                     tuple: (self.a_producer, b_producer),
-//                 })
-//             }
-//         }
-//     }
-// }
-
-// struct MultiZipProducer<Tuple> {
-//     tuple: Tuple,
-// }
-
-// impl<A: Producer, B: Producer> Producer for MultiZipProducer<(A, B)> {
-//     type Item = (A::Item, B::Item);
-//     type IntoIter = itertools::structs::Zip<(A::IntoIter, B::IntoIter)>;
-
-//     fn into_iter(self) -> Self::IntoIter {
-//         multizip((self.tuple.0.into_iter(),self.tuple.1.into_iter()))
-//     }
-
-//     fn min_len(&self) -> usize {
-//         cmp::max(self.tuple.0.min_len(), self.tuple.1.min_len())
-//     }
-
-//     fn max_len(&self) -> usize {
-//         cmp::min(self.tuple.0.max_len(), self.tuple.1.max_len())
-//     }
-
-//     fn split_at(self, index: usize) -> (Self, Self) {
-//         let (a_left, a_right) = self.tuple.0.split_at(index);
-//         let (b_left, b_right) = self.tuple.1.split_at(index);
-//         (
-//             MultiZipProducer {
-//                 tuple: (a_left, b_left),
-//             },
-//             MultiZipProducer {
-//                 tuple: (a_right, b_right),
-//             },
-//         )
-//     }
-// }
