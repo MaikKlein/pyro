@@ -83,8 +83,10 @@
 extern crate itertools;
 #[macro_use]
 extern crate downcast_rs;
+extern crate fnv;
 extern crate rayon;
 use downcast_rs::Downcast;
+use fnv::FnvHashMap;
 use itertools::{multizip, Zip};
 use std::any::TypeId;
 use std::cell::UnsafeCell;
@@ -111,8 +113,12 @@ pub struct Entity {
 /// [`World`] is the heart of this library. It owns all the [`Component`]s and [`Storage`]s.
 /// It also manages entities and allows [`Component`]s to be safely queried.
 pub struct World<S = SoaStorage> {
-    entities: Vec<Vec<Entity>>,
-    component_map: Vec<Vec<ComponentId>>,
+    /// Storages need to be linear, that is why deletion will use [`Vec::swap_remove`] under the
+    /// hood. But this moves the components around and we need to keep track of those swaps. This
+    /// map is then used to find the correct [`ComponentId`] for an [`Entity`].
+    component_map: Vec<FnvHashMap<ComponentId, ComponentId>>,
+    /// When we remove an [`Entity`], we will put it in this free map to be reused.
+    free_map: Vec<ComponentId>,
     storages: Vec<S>,
 }
 
@@ -120,9 +126,20 @@ impl<S> World<S>
 where
     S: Storage,
 {
-    /// Creates an `Iterator` over every [`Entity`] inside [`World`].
+    /// Creates an `Iterator` over every [`Entity`] inside [`World`]. The entities are
+    /// not ordered.
     pub fn entities<'s>(&'s self) -> impl Iterator<Item = Entity> + 's {
-        self.entities.iter().flat_map(|inner| inner.iter().cloned())
+        self.component_map
+            .iter()
+            .enumerate()
+            .flat_map(move |(idx, inner)| {
+                let storage_id = idx as StorageId;
+                inner.keys().cloned().map(move |component_id| Entity {
+                    storage_id,
+                    id: component_id,
+                    version: 0,
+                })
+            })
     }
     /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
     /// component immutable while [`Write`] will borrow the component mutable.
@@ -136,6 +153,21 @@ where
     ///        });
     /// }
     /// ```
+    // Slightly awkward implementation. We always iterate linear but removing components will
+    // make the entities inside the component map non linear. We have to actually sort the keys
+    // with the values.
+    fn entities_storage(&self, storage_id: StorageId) -> impl Iterator<Item = Entity> {
+        let mut map: Vec<_> = self.component_map[storage_id as usize]
+            .iter()
+            .map(|(&a, &b)| (a, b))
+            .collect();
+        map.sort_by(|(_, v1), (_, v2)| Ord::cmp(v1, v2));
+        map.into_iter().map(move |(component_id, _)| Entity {
+            storage_id,
+            id: component_id,
+            version: 0,
+        })
+    }
     pub fn matcher<'s, Q>(
         &'s mut self,
     ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
@@ -167,17 +199,20 @@ where
     where
         Q: Query<'s> + Matcher,
     {
-        let entities = &self.entities;
-        self.storages
-            .iter()
-            .enumerate()
-            .filter(|&(_, storage)| Q::is_match(storage))
-            // [FIXME] Honestly I am not sure why need to move the borrow from outside
-            // into the closure. We get lifetime error for self otherwise, which is odd.
-            .map(move |(storage_id, storage)| unsafe {
-                let query = Q::query(storage);
-                entities[storage_id].iter().cloned().zip(query)
-            }).flat_map(|iter| iter)
+        unsafe {
+            // We need to explicitly tell rust how long we reborrow `self`, or the borrow checker
+            // gets confused.
+            let s: &'s Self = self;
+            self.storages
+                .iter()
+                .enumerate()
+                .filter(|&(_, storage)| Q::is_match(storage))
+                .flat_map(move |(id, storage)| {
+                    let query = Q::query(storage);
+                    let entities = s.entities_storage(id as StorageId);
+                    Iterator::zip(entities, query)
+                })
+        }
     }
 }
 impl<S> World<S>
@@ -187,8 +222,8 @@ where
     /// Creates an empty [`World`].
     pub fn new() -> Self {
         World {
-            entities: Vec::new(),
             component_map: Vec::new(),
+            free_map: Vec::new(),
             storages: Vec::new(),
         }
     }
@@ -213,21 +248,18 @@ where
             let len = A::append_components(i, &mut storage);
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
-            self.entities.push(Vec::new());
-            self.component_map.push(Vec::new());
+            self.component_map.push(FnvHashMap::default());
             (id, len)
         };
         // Inserting components is not enough, we also need to create the entity ids
         // for those components.
-        let start_len = self.entities[storage_id as usize].len() as u32;
-        let end_len = start_len + insert_count as u32;
-        let entities = (start_len..end_len).map(|id| Entity {
-            storage_id: storage_id,
-            id,
-            version: 0,
-        });
-        self.component_map[storage_id as usize].extend(entities.clone().map(|e| e.id));
-        self.entities[storage_id as usize].extend(entities);
+        let start_len = self.component_map[storage_id as usize].len() as ComponentId;
+        let end_len = start_len + insert_count as ComponentId;
+        for id in start_len..end_len {
+            // If we have some unused ids, then we should use them
+            let insert_id = self.free_map.pop().unwrap_or(id);
+            self.component_map[storage_id as usize].insert(insert_id, id);
+        }
     }
 
     pub fn remove_entities<I>(&mut self, entities: I)
@@ -236,12 +268,16 @@ where
     {
         for entity in entities {
             let storage_id = entity.storage_id as usize;
+            let component_id = self.component_map[storage_id][&entity.id];
             // [FIXME]: This uses dynamic dispatch so we might want to batch entities
             // together to reduce the overhead.
-            let component_id = self.component_map[storage_id][entity.id as usize];
-            let swap = self.storages[storage_id].remove(component_id);
+            let swap = self.storages[storage_id].remove(component_id) as ComponentId;
             // We need to keep track which entity was deleted and which was swapped.
-            self.component_map[storage_id].swap(swap, component_id as usize);
+            if swap != component_id {
+                self.component_map[storage_id].insert(swap, component_id);
+            }
+            self.component_map[storage_id].remove(&entity.id);
+            self.free_map.push(entity.id);
         }
     }
 }

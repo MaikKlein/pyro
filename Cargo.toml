@@ -13,6 +13,7 @@ description = "Entity component system"
 itertools = "0.7"
 rayon = "1"
 downcast-rs = "1.0"
+fnv = "1.0"
 
 
 [dev-dependencies]
