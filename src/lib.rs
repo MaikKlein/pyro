@@ -228,6 +228,10 @@ where
         }
     }
     /// Appends the components and also creates the necessary [`Entity`]s behind the scenes.
+    /// If you only want to append a single set of components then you can do
+    /// ```rust,ignore
+    /// world.append_components(Some((a, b, c)))`;
+    /// ```
     pub fn append_components<A, I>(&mut self, i: I)
     where
         A: AppendComponents + BuildStorage,
@@ -274,7 +278,12 @@ where
             let swap = self.storages[storage_id].remove(component_id) as ComponentId;
             // We need to keep track which entity was deleted and which was swapped.
             if swap != component_id {
-                self.component_map[storage_id].insert(swap, component_id);
+                let (&key, _) = self.component_map[storage_id]
+                    .iter()
+                    .find(|(key, &value)| value == swap)
+                    .expect("Unable to update component id because it does not exist");
+
+                self.component_map[storage_id].insert(key, component_id);
             }
             self.component_map[storage_id].remove(&entity.id);
             self.free_map.push(entity.id);
@@ -345,6 +354,7 @@ macro_rules! impl_matcher_all{
     }
 }
 
+impl_matcher_all!(A);
 impl_matcher_all!(A, B);
 impl_matcher_all!(A, B, C);
 impl_matcher_all!(A, B, C, D);
@@ -378,6 +388,7 @@ macro_rules! impl_query_all{
     }
 }
 
+impl_query_all!(A);
 impl_query_all!(A, B);
 impl_query_all!(A, B, C);
 impl_query_all!(A, B, C, D);
@@ -487,13 +498,14 @@ pub trait ComponentList: Sized {
 
 macro_rules! impl_component_list {
     ($size: expr => $($ty: ident),*) => {
-        impl<$($ty,)*> ComponentList for ($($ty),*) {
+        impl<$($ty,)*> ComponentList for ($($ty,)*) {
             const SIZE: usize = $size;
             type Components = ($($ty,)*);
         }
     }
 }
 
+impl_component_list!(1 => A);
 impl_component_list!(2 => A, B);
 impl_component_list!(3 => A, B, C);
 impl_component_list!(4 => A, B, C, D);
