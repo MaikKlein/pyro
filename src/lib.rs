@@ -141,18 +141,6 @@ where
                 })
             })
     }
-    /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
-    /// component immutable while [`Write`] will borrow the component mutable.
-    /// ```rust,ignore
-    /// fn update(world: &mut World) {
-    ///    world
-    ///        .matcher::<All<(Write<Position>, Read<Velocity>)>>()
-    ///        .for_each(|(p, v)| {
-    ///            p.x += v.dx;
-    ///            p.y += v.dy;
-    ///        });
-    /// }
-    /// ```
     // Slightly awkward implementation. We always iterate linear but removing components will
     // make the entities inside the component map non linear. We have to actually sort the keys
     // with the values.
@@ -168,6 +156,18 @@ where
             version: 0,
         })
     }
+    /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
+    /// component immutable while [`Write`] will borrow the component mutable.
+    /// ```rust,ignore
+    /// fn update(world: &mut World) {
+    ///    world
+    ///        .matcher::<All<(Write<Position>, Read<Velocity>)>>()
+    ///        .for_each(|(p, v)| {
+    ///            p.x += v.dx;
+    ///            p.y += v.dy;
+    ///        });
+    /// }
+    /// ```
     pub fn matcher<'s, Q>(
         &'s mut self,
     ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
