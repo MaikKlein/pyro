@@ -88,7 +88,6 @@ extern crate parking_lot;
 extern crate rayon;
 extern crate typedef;
 extern crate vec_map;
-use vec_map::VecMap;
 use downcast_rs::Downcast;
 use fnv::FnvHashMap;
 use itertools::{multizip, Zip};
@@ -96,35 +95,49 @@ use parking_lot::Mutex;
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
+use std::iter::FusedIterator;
 use std::marker::PhantomData;
 use typedef::TypeDef;
+use vec_map::VecMap;
 
 pub type StorageId = u16;
 pub type ComponentId = u32;
 
-/// A simple Iterator that removes its borrows on drop.
-pub struct MatchIter<'s, S: Storage, I> {
+/// The [`Iterator`] is used to end a borrow from a query like [`World::matcher`].
+pub struct BorrowIter<'s, S, I> {
     world: &'s World<S>,
     iter: I,
 }
 
-impl<'s, S, I> Drop for MatchIter<'s, S, I>
+impl<'s, S, I> Iterator for BorrowIter<'s, S, I>
 where
-    S: Storage,
+    I: Iterator,
 {
-    fn drop(&mut self) {
-        self.world.runtime_borrow.lock().pop_access();
+    type Item = I::Item;
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
     }
 }
 
-impl<'s, S, I> Iterator for MatchIter<'s, S, I>
+impl<'s, S, I> FusedIterator for BorrowIter<'s, S, I> where I: FusedIterator {}
+
+impl<'s, S, I> ExactSizeIterator for BorrowIter<'s, S, I>
 where
-    I: Iterator,
-    S: Storage,
+    I: ExactSizeIterator,
 {
-    type Item = I::Item;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+}
+
+impl<'s, S, I> Drop for BorrowIter<'s, S, I> {
+    fn drop(&mut self) {
+        self.world.runtime_borrow.lock().pop_access();
     }
 }
 
@@ -152,6 +165,7 @@ pub struct World<S = SoaStorage> {
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<ComponentId>,
     storages: Vec<S>,
+    /// The runtime borrow system. See [`RuntimeBorrow`] for more information.
     runtime_borrow: Mutex<RuntimeBorrow>,
 }
 impl<S> World<S>
@@ -188,6 +202,18 @@ where
             version: 0,
         })
     }
+    fn borrow_and_validate<Borrow: RegisterBorrow>(&self) {
+        let mut borrow = self.runtime_borrow.lock();
+        borrow.push_access::<Borrow>();
+        if let Err(overlapping_borrows) = borrow.validate() {
+            panic!("Detected multiple active borrows of: {:?}", {
+                overlapping_borrows
+                    .iter()
+                    .map(|ty| ty.get_str())
+                    .collect::<Vec<_>>()
+            });
+        }
+    }
     /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
     /// component immutable while [`Write`] will borrow the component mutable.
     /// ```rust,ignore
@@ -205,20 +231,9 @@ where
     ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
     where
         Q: Query<'s> + Matcher,
-        Q::Access: RegisterBorrow,
+        Q::Borrow: RegisterBorrow,
     {
-        {
-            let mut borrow = self.runtime_borrow.lock();
-            borrow.append_access::<Q::Access>();
-            if let Err(overlapping_borrows) = borrow.validate() {
-                panic!("Detected multiple active borrows of: {:?}", {
-                    overlapping_borrows
-                        .iter()
-                        .map(|ty| ty.get_str())
-                        .collect::<Vec<_>>()
-                });
-            }
-        }
+        self.borrow_and_validate::<Q::Borrow>();
         let iter = unsafe {
             self.storages
                 .iter()
@@ -226,7 +241,9 @@ where
                 .map(|storage| Q::query(storage))
                 .flat_map(|iter| iter)
         };
-        MatchIter { world: self, iter }
+        // [FIXME]: BorrowIter is more than 2x slower, than just returning `iter` here for the
+        // `ecs_bench`. Mayhe the benchmark is too simple?
+        BorrowIter { world: self, iter }
     }
     /// Same as [`World::matcher`] but also returns the corresponding [`Entity`].
     /// ```rust,ignore
@@ -244,21 +261,23 @@ where
     ) -> impl Iterator<Item = (Entity, <<Q as Query<'s>>::Iter as Iterator>::Item)> + 's
     where
         Q: Query<'s> + Matcher,
+        Q::Borrow: RegisterBorrow,
     {
-        unsafe {
-            // We need to explicitly tell rust how long we reborrow `self`, or the borrow checker
-            // gets confused.
-            let s: &'s Self = self;
-            self.storages
-                .iter()
-                .enumerate()
-                .filter(|&(_, storage)| Q::is_match(storage))
-                .flat_map(move |(id, storage)| {
-                    let query = Q::query(storage);
-                    let entities = s.entities_storage(id as StorageId);
-                    Iterator::zip(entities, query)
-                })
-        }
+        self.borrow_and_validate::<Q::Borrow>();
+        // We need to explicitly tell rust how long we reborrow `self`, or the borrow checker
+        // gets confused.
+        let s: &'s Self = self;
+        let iter = self
+            .storages
+            .iter()
+            .enumerate()
+            .filter(|&(_, storage)| Q::is_match(storage))
+            .flat_map(move |(id, storage)| {
+                let query = unsafe { Q::query(storage) };
+                let entities = s.entities_storage(id as StorageId);
+                Iterator::zip(entities, query)
+            });
+        BorrowIter { world: self, iter }
     }
 }
 impl<S> World<S>
@@ -311,7 +330,6 @@ where
         for (at, id) in e {
             self.component_map[storage_id as usize].insert(at as usize, id);
         }
-
     }
 
     pub fn remove_entities<I>(&mut self, entities: I)
@@ -340,21 +358,21 @@ where
 }
 
 pub trait RegisterBorrow {
-    fn register_borrow() -> Access;
+    fn register_borrow() -> Borrow;
 }
 
 pub trait AddAccess {
-    fn add_access(acccess: &mut Access);
+    fn add_access(acccess: &mut Borrow);
 }
 impl<T: Component> AddAccess for Write<T> {
-    fn add_access(access: &mut Access) {
-        access.writes.insert(TypeDef::of::<T>());
+    fn add_access(borrow: &mut Borrow) {
+        borrow.writes.insert(TypeDef::of::<T>());
     }
 }
 
 impl<T: Component> AddAccess for Read<T> {
-    fn add_access(access: &mut Access) {
-        access.reads.insert(TypeDef::of::<T>());
+    fn add_access(borrow: &mut Borrow) {
+        borrow.reads.insert(TypeDef::of::<T>());
     }
 }
 
@@ -366,12 +384,12 @@ macro_rules! impl_register_borrow{
                 $ty: AddAccess,
             )*
         {
-            fn register_borrow() -> Access {
-                let mut access = Access::new();
+            fn register_borrow() -> Borrow {
+                let mut borrow = Borrow::new();
                 $(
-                    $ty::add_access(&mut access);
+                    $ty::add_access(&mut borrow);
                 )*
-                access
+                borrow
             }
         }
     }
@@ -384,36 +402,43 @@ impl_register_borrow!(A, B, C, D, E);
 impl_register_borrow!(A, B, C, D, E, F);
 impl_register_borrow!(A, B, C, D, E, F, G);
 impl_register_borrow!(A, B, C, D, E, F, G, H);
+
+/// Rusts borrowing rules are flexible enough for an ECS. Often it would prefered to nest multiple
+/// query like [`World::matcher`], but this is not possible if both borrows would be mutable.
+/// Instead we track active borrows at runtime. Multiple reads are allowed but `read/write` and
+/// `write/write` are not.
 pub struct RuntimeBorrow {
-    accesses: Vec<Access>,
+    borrows: Vec<Borrow>,
 }
 impl RuntimeBorrow {
     pub fn new() -> Self {
         Self {
-            accesses: Vec::new(),
+            borrows: Vec::new(),
         }
     }
-    pub fn append_access<R: RegisterBorrow>(&mut self) {
-        let access = R::register_borrow();
-        self.accesses.push(access);
+
+    /// Creates and pushes an [`Borrow`] on to the stack.
+    pub fn push_access<R: RegisterBorrow>(&mut self) {
+        let borrow = R::register_borrow();
+        self.borrows.push(borrow);
     }
     pub fn pop_access(&mut self) {
-        self.accesses.pop();
+        self.borrows.pop();
     }
     pub fn validate(&self) -> Result<(), Vec<TypeDef>> {
         let overlapping_borrows: Vec<_> = self
-            .accesses
+            .borrows
             .iter()
             .enumerate()
-            .flat_map(|(idx, access)| {
-                let reads = access.writes.intersection(&access.reads).cloned();
+            .flat_map(|(idx, borrow)| {
+                let reads = borrow.writes.intersection(&borrow.reads).cloned();
                 let rest: Vec<_> = self
-                    .accesses
+                    .borrows
                     .iter()
                     .skip(idx + 1)
                     .flat_map(|next_access| {
-                        let writes = access.writes.intersection(&next_access.writes).cloned();
-                        let reads = access.writes.intersection(&next_access.reads).cloned();
+                        let writes = borrow.writes.intersection(&next_access.writes).cloned();
+                        let reads = borrow.writes.intersection(&next_access.reads).cloned();
                         writes.chain(reads)
                     }).collect();
                 reads.chain(rest)
@@ -426,11 +451,11 @@ impl RuntimeBorrow {
     }
 }
 
-pub struct Access {
+pub struct Borrow {
     reads: HashSet<TypeDef>,
     writes: HashSet<TypeDef>,
 }
-impl Access {
+impl Borrow {
     pub fn new() -> Self {
         Self {
             reads: HashSet::new(),
@@ -449,7 +474,7 @@ pub struct Write<C>(PhantomData<C>);
 /// mutable or immutable.
 pub trait Fetch<'s> {
     type Component: Component;
-    type Iter: Iterator + 's;
+    type Iter: ExactSizeIterator + 's;
     unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
@@ -475,8 +500,8 @@ pub trait Matcher {
 }
 /// Allows to query multiple components from a [`Storage`]. See also [`All`].
 pub trait Query<'s> {
-    type Access;
-    type Iter: Iterator + 's;
+    type Borrow;
+    type Iter: ExactSizeIterator + 's;
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
@@ -519,7 +544,7 @@ impl<'s, A> Query<'s> for All<'s, A>
 where
     A: Fetch<'s>,
 {
-    type Access = A;
+    type Borrow = A;
     type Iter = A::Iter;
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
         A::fetch(storage)
@@ -534,7 +559,7 @@ macro_rules! impl_query_all{
                 $ty: Fetch<'s>,
             )*
         {
-            type Access = ($($ty,)*);
+            type Borrow = ($($ty,)*);
             type Iter = Zip<($($ty::Iter,)*)>;
             unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
                 multizip(($($ty::fetch(storage),)*))
