@@ -83,13 +83,11 @@
 extern crate itertools;
 #[macro_use]
 extern crate downcast_rs;
-extern crate fnv;
 extern crate parking_lot;
 extern crate rayon;
 extern crate typedef;
 extern crate vec_map;
 use downcast_rs::Downcast;
-use fnv::FnvHashMap;
 use itertools::{multizip, Zip};
 use parking_lot::Mutex;
 use std::any::TypeId;
@@ -165,7 +163,8 @@ pub struct World<S = SoaStorage> {
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<ComponentId>,
     storages: Vec<S>,
-    /// The runtime borrow system. See [`RuntimeBorrow`] for more information.
+    /// The runtime borrow system. See [`RuntimeBorrow`] for more information. It is also wrapped
+    /// in a Mutex so that we can keep track of multiple borrows on different threads.
     runtime_borrow: Mutex<RuntimeBorrow>,
 }
 impl<S> World<S>
@@ -188,7 +187,7 @@ where
             })
     }
     // Slightly awkward implementation. We always iterate linear but removing components will
-    // make the entities inside the component map non linear. We have to actually sort the keys
+    // make the entities inside the `component_map` non linear. We have to actually sort the keys
     // with the values.
     fn entities_storage(&self, storage_id: StorageId) -> impl Iterator<Item = Entity> {
         let mut map: Vec<_> = self.component_map[storage_id as usize]
@@ -346,7 +345,7 @@ where
             if swap != component_id {
                 let (key, _) = self.component_map[storage_id]
                     .iter()
-                    .find(|(key, &value)| value == swap)
+                    .find(|(_, &value)| value == swap)
                     .expect("Unable to update component id because it does not exist");
 
                 self.component_map[storage_id].insert(key, component_id);
@@ -362,6 +361,8 @@ pub trait RegisterBorrow {
     fn register_borrow() -> Borrow;
 }
 
+/// Is implemented for [`Read`] and [`Write`] and is used to insert reads and writes into the
+/// correct [`HashSet`].
 pub trait PushBorrow {
     fn push_borrow(acccess: &mut Borrow);
 }
@@ -395,6 +396,7 @@ macro_rules! impl_register_borrow{
         }
     }
 }
+
 impl_register_borrow!(A);
 impl_register_borrow!(A, B);
 impl_register_borrow!(A, B, C);
@@ -418,14 +420,16 @@ impl RuntimeBorrow {
         }
     }
 
-    /// Creates and pushes an [`Borrow`] on to the stack.
+    /// Creates and pushes an [`Borrow`] on to the stack. 
     pub fn push_access<R: RegisterBorrow>(&mut self) {
         let borrow = R::register_borrow();
         self.borrows.push(borrow);
     }
+    /// Removes latest [`Borrow`]. This is usually called when an [`BorrowIter`] is dropped.
     pub fn pop_access(&mut self) {
         self.borrows.pop();
     }
+    /// Validates the borrows. Multiple reads are allowed but Read/Write and Write/Write are not.
     pub fn validate(&self) -> Result<(), Vec<TypeDef>> {
         let overlapping_borrows: Vec<_> = self
             .borrows
@@ -456,6 +460,7 @@ pub struct Borrow {
     reads: HashSet<TypeDef>,
     writes: HashSet<TypeDef>,
 }
+
 impl Borrow {
     pub fn new() -> Self {
         Self {
