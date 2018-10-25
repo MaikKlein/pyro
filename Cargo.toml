@@ -14,6 +14,10 @@ itertools = "0.7"
 rayon = "1"
 downcast-rs = "1.0"
 fnv = "1.0"
+parking_lot = "0.6"
+[dependencies.typedef]
+version = "0.3"
+features = ["nightly"]
 
 
 [dev-dependencies]
@@ -21,8 +25,5 @@ cgmath = "0.16"
 rand = "0.5"
 
 [profile.bench]
-opt-level = 3
-debug=true
-[profile.release]
 opt-level = 3
 debug=true

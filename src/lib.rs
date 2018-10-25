@@ -84,14 +84,18 @@ extern crate itertools;
 #[macro_use]
 extern crate downcast_rs;
 extern crate fnv;
+extern crate parking_lot;
 extern crate rayon;
+extern crate typedef;
 use downcast_rs::Downcast;
 use fnv::FnvHashMap;
 use itertools::{multizip, Zip};
+use parking_lot::Mutex;
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use typedef::TypeDef;
 
 pub type StorageId = u16;
 pub type ComponentId = u32;
@@ -120,8 +124,34 @@ pub struct World<S = SoaStorage> {
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<ComponentId>,
     storages: Vec<S>,
+    runtime_borrow: Mutex<RuntimeBorrow>,
 }
 
+/// A simple Iterator that removes its borrows on drop.
+pub struct MatchIter<'s, S: Storage, I> {
+    world: &'s World<S>,
+    iter: I,
+}
+
+impl<'s, S, I> Drop for MatchIter<'s, S, I>
+where
+    S: Storage,
+{
+    fn drop(&mut self) {
+        self.world.runtime_borrow.lock().pop_access();
+    }
+}
+
+impl<'s, S, I> Iterator for MatchIter<'s, S, I>
+where
+    I: Iterator,
+    S: Storage,
+{
+    type Item = I::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
 impl<S> World<S>
 where
     S: Storage,
@@ -169,18 +199,32 @@ where
     /// }
     /// ```
     pub fn matcher<'s, Q>(
-        &'s mut self,
+        &'s self,
     ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
     where
         Q: Query<'s> + Matcher,
+        Q::Access: RegisterBorrow,
     {
-        unsafe {
+        {
+            let mut borrow = self.runtime_borrow.lock();
+            borrow.append_access::<Q::Access>();
+            if let Err(overlapping_borrows) = borrow.validate() {
+                panic!("Detected multiple active borrows of: {:?}", {
+                    overlapping_borrows
+                        .iter()
+                        .map(|ty| ty.get_str())
+                        .collect::<Vec<_>>()
+                });
+            }
+        }
+        let iter = unsafe {
             self.storages
                 .iter()
                 .filter(|&storage| Q::is_match(storage))
                 .map(|storage| Q::query(storage))
                 .flat_map(|iter| iter)
-        }
+        };
+        MatchIter { world: self, iter }
     }
     /// Same as [`World::matcher`] but also returns the corresponding [`Entity`].
     /// ```rust,ignore
@@ -194,7 +238,7 @@ where
     /// }
     /// ```
     pub fn matcher_with_entities<'s, Q>(
-        &'s mut self,
+        &'s self,
     ) -> impl Iterator<Item = (Entity, <<Q as Query<'s>>::Iter as Iterator>::Item)> + 's
     where
         Q: Query<'s> + Matcher,
@@ -222,6 +266,7 @@ where
     /// Creates an empty [`World`].
     pub fn new() -> Self {
         World {
+            runtime_borrow: Mutex::new(RuntimeBorrow::new()),
             component_map: Vec::new(),
             free_map: Vec::new(),
             storages: Vec::new(),
@@ -290,6 +335,106 @@ where
         }
     }
 }
+
+pub trait RegisterBorrow {
+    fn register_borrow() -> Access;
+}
+
+pub trait AddAccess {
+    fn add_access(acccess: &mut Access);
+}
+impl<T: Component> AddAccess for Write<T> {
+    fn add_access(access: &mut Access) {
+        access.writes.insert(TypeDef::of::<T>());
+    }
+}
+
+impl<T: Component> AddAccess for Read<T> {
+    fn add_access(access: &mut Access) {
+        access.reads.insert(TypeDef::of::<T>());
+    }
+}
+
+macro_rules! impl_register_borrow{
+    ($($ty: ident),*) => {
+        impl<$($ty,)*> RegisterBorrow for ($($ty,)*)
+        where
+            $(
+                $ty: AddAccess,
+            )*
+        {
+            fn register_borrow() -> Access {
+                let mut access = Access::new();
+                $(
+                    $ty::add_access(&mut access);
+                )*
+                access
+            }
+        }
+    }
+}
+impl_register_borrow!(A);
+impl_register_borrow!(A, B);
+impl_register_borrow!(A, B, C);
+impl_register_borrow!(A, B, C, D);
+impl_register_borrow!(A, B, C, D, E);
+impl_register_borrow!(A, B, C, D, E, F);
+impl_register_borrow!(A, B, C, D, E, F, G);
+impl_register_borrow!(A, B, C, D, E, F, G, H);
+pub struct RuntimeBorrow {
+    accesses: Vec<Access>,
+}
+impl RuntimeBorrow {
+    pub fn new() -> Self {
+        Self {
+            accesses: Vec::new(),
+        }
+    }
+    pub fn append_access<R: RegisterBorrow>(&mut self) {
+        let access = R::register_borrow();
+        self.accesses.push(access);
+    }
+    pub fn pop_access(&mut self) {
+        self.accesses.pop();
+    }
+    pub fn validate(&self) -> Result<(), Vec<TypeDef>> {
+        let overlapping_borrows: Vec<_> = self
+            .accesses
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, access)| {
+                let reads = access.writes.intersection(&access.reads).cloned();
+                let rest: Vec<_> = self
+                    .accesses
+                    .iter()
+                    .skip(idx + 1)
+                    .flat_map(|next_access| {
+                        let writes = access.writes.intersection(&next_access.writes).cloned();
+                        let reads = access.writes.intersection(&next_access.reads).cloned();
+                        writes.chain(reads)
+                    }).collect();
+                reads.chain(rest)
+            }).collect();
+        if overlapping_borrows.len() == 0 {
+            Ok(())
+        } else {
+            Err(overlapping_borrows)
+        }
+    }
+}
+
+pub struct Access {
+    reads: HashSet<TypeDef>,
+    writes: HashSet<TypeDef>,
+}
+impl Access {
+    pub fn new() -> Self {
+        Self {
+            reads: HashSet::new(),
+            writes: HashSet::new(),
+        }
+    }
+}
 pub trait Component: Send + 'static {}
 impl<C: 'static + Send> Component for C {}
 
@@ -327,6 +472,7 @@ pub trait Matcher {
 }
 /// Allows to query multiple components from a [`Storage`]. See also [`All`].
 pub trait Query<'s> {
+    type Access;
     type Iter: Iterator + 's;
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
@@ -361,11 +507,16 @@ impl_matcher_all!(A, B, C, D);
 impl_matcher_all!(A, B, C, D, E);
 impl_matcher_all!(A, B, C, D, E, F);
 impl_matcher_all!(A, B, C, D, E, F, G);
+impl_matcher_all!(A, B, C, D, E, F, G, H);
+// impl_matcher_all!(A, B, C, D, E, F, G, H, I);
+// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J);
+// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J, K);
 
 impl<'s, A> Query<'s> for All<'s, A>
 where
     A: Fetch<'s>,
 {
+    type Access = A;
     type Iter = A::Iter;
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
         A::fetch(storage)
@@ -380,8 +531,9 @@ macro_rules! impl_query_all{
                 $ty: Fetch<'s>,
             )*
         {
+            type Access = ($($ty,)*);
             type Iter = Zip<($($ty::Iter,)*)>;
-            unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
+            unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
                 multizip(($($ty::fetch(storage),)*))
             }
         }
@@ -395,6 +547,10 @@ impl_query_all!(A, B, C, D);
 impl_query_all!(A, B, C, D, E);
 impl_query_all!(A, B, C, D, E, F);
 impl_query_all!(A, B, C, D, E, F, G);
+impl_query_all!(A, B, C, D, E, F, G, H);
+// impl_query_all!(A, B, C, D, E, F, G, H, I);
+// impl_query_all!(A, B, C, D, E, F, G, H, I, J);
+// impl_query_all!(A, B, C, D, E, F, G, H, I, J, K);
 
 pub struct EmptyStorage<S> {
     storage: S,
@@ -429,6 +585,11 @@ impl_build_storage!(A, B, C);
 impl_build_storage!(A, B, C, D);
 impl_build_storage!(A, B, C, D, E);
 impl_build_storage!(A, B, C, D, E, F);
+impl_build_storage!(A, B, C, D, E, F, G);
+impl_build_storage!(A, B, C, D, E, F, G, H);
+// impl_build_storage!(A, B, C, D, E, F, G, H, I);
+// impl_build_storage!(A, B, C, D, E, F, G, H, I, J);
+// impl_build_storage!(A, B, C, D, E, F, G, H, I, J, k);
 
 impl<S> EmptyStorage<S>
 where
@@ -475,20 +636,6 @@ impl<T> UnsafeStorage<T> {
     pub unsafe fn inner_mut(&self) -> &mut Vec<T> {
         &mut (*self.0.get())
     }
-    // pub fn push(&self, t: T) {
-    //     unsafe { (*self.0.get()).push(t) }
-    // }
-    // pub fn is_empty(&self) -> bool {
-    //     unsafe { (*self.0.get()).is_empty() }
-    // }
-
-    // pub unsafe fn get_slice(&self) -> &[T] {
-    //     (*self.0.get()).as_slice()
-    // }
-
-    // pub unsafe fn get_mut_slice(&self) -> &mut [T] {
-    //     (*self.0.get()).as_mut_slice()
-    // }
 }
 
 pub trait ComponentList: Sized {
@@ -505,12 +652,17 @@ macro_rules! impl_component_list {
     }
 }
 
-impl_component_list!(1 => A);
-impl_component_list!(2 => A, B);
-impl_component_list!(3 => A, B, C);
-impl_component_list!(4 => A, B, C, D);
-impl_component_list!(5 => A, B, C, D, E);
-impl_component_list!(6 => A, B, C, D, E, F);
+impl_component_list!(1  => A);
+impl_component_list!(2  => A, B);
+impl_component_list!(3  => A, B, C);
+impl_component_list!(4  => A, B, C, D);
+impl_component_list!(5  => A, B, C, D, E);
+impl_component_list!(6  => A, B, C, D, E, F);
+impl_component_list!(7  => A, B, C, D, E, F, G);
+impl_component_list!(8  => A, B, C, D, E, F, G, H);
+// impl_component_list!(9  => A, B, C, D, E, F, G, H, I);
+// impl_component_list!(10 => A, B, C, D, E, F, G, H, I, J);
+// impl_component_list!(11 => A, B, C, D, E, F, G, H, I, J, k);
 
 pub trait IteratorSoa: Sized {
     type Output;
@@ -525,7 +677,7 @@ macro_rules! impl_iterator_soa {
             )*
         {
             type Output = ($(Vec<$ty>,)*);
-            fn to_soa<I: Iterator<Item = Self>>(iter: I) -> Self::Output {
+            fn to_soa<Iter: Iterator<Item = Self>>(iter: Iter) -> Self::Output {
                 $(
                     #[allow(non_snake_case)]
                     let mut $ty = Vec::new();
@@ -546,6 +698,53 @@ impl_iterator_soa!((a, A), (b, B), (c, C));
 impl_iterator_soa!((a, A), (b, B), (c, C), (d, D));
 impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E));
 impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F));
+impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F), (g, G));
+impl_iterator_soa!(
+    (a, A),
+    (b, B),
+    (c, C),
+    (d, D),
+    (e, E),
+    (f, F),
+    (g, G),
+    (h, H)
+);
+// impl_iterator_soa!(
+//     (a, A),
+//     (b, B),
+//     (c, C),
+//     (d, D),
+//     (e, E),
+//     (f, F),
+//     (g, G),
+//     (h, H),
+//     (i, I)
+// );
+// impl_iterator_soa!(
+//     (a, A),
+//     (b, B),
+//     (c, C),
+//     (d, D),
+//     (e, E),
+//     (f, F),
+//     (g, G),
+//     (h, H),
+//     (i, I),
+//     (j, J)
+// );
+// impl_iterator_soa!(
+//     (a, A),
+//     (b, B),
+//     (c, C),
+//     (d, D),
+//     (e, E),
+//     (f, F),
+//     (g, G),
+//     (h, H),
+//     (i, I),
+//     (j, J),
+//     (k, K)
+// );
 
 pub trait AppendComponents
 where
@@ -575,10 +774,10 @@ macro_rules! impl_append_components {
                 b
             }
 
-            fn append_components<I, S>(items: I, storage: &mut S) -> usize
+            fn append_components<Iter, S>(items: Iter, storage: &mut S) -> usize
             where
                 S: Storage,
-                I: IntoIterator<Item = Self>,
+                Iter: IntoIterator<Item = Self>,
             {
                 let tuple = Self::to_soa(items.into_iter());
                 let len = tuple.0.len();
@@ -594,11 +793,16 @@ macro_rules! impl_append_components {
     }
 }
 
-impl_append_components!(2 => A, B);
-impl_append_components!(3 => A, B, C);
-impl_append_components!(4 => A, B, C, D);
-impl_append_components!(5 => A, B, C, D, E);
-impl_append_components!(6 => A, B, C, D, E, F);
+impl_append_components!(2  => A, B);
+impl_append_components!(3  => A, B, C);
+impl_append_components!(4  => A, B, C, D);
+impl_append_components!(5  => A, B, C, D, E);
+impl_append_components!(6  => A, B, C, D, E, F);
+impl_append_components!(7  => A, B, C, D, E, F, G);
+impl_append_components!(8  => A, B, C, D, E, F, G, H);
+// impl_append_components!(9  => A, B, C, D, E, F, G, H, I);
+// impl_append_components!(10 => A, B, C, D, E, F, G, H, I, J);
+// impl_append_components!(11 => A, B, C, D, E, F, G, H, I, J, k);
 
 /// A runtime SoA storage. It stands for **S**tructure **o**f **A**rrays.
 ///
