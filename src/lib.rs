@@ -358,20 +358,21 @@ where
 }
 
 pub trait RegisterBorrow {
+    /// Creates a new borrow
     fn register_borrow() -> Borrow;
 }
 
-pub trait AddAccess {
-    fn add_access(acccess: &mut Borrow);
+pub trait PushBorrow {
+    fn push_borrow(acccess: &mut Borrow);
 }
-impl<T: Component> AddAccess for Write<T> {
-    fn add_access(borrow: &mut Borrow) {
+impl<T: Component> PushBorrow for Write<T> {
+    fn push_borrow(borrow: &mut Borrow) {
         borrow.writes.insert(TypeDef::of::<T>());
     }
 }
 
-impl<T: Component> AddAccess for Read<T> {
-    fn add_access(borrow: &mut Borrow) {
+impl<T: Component> PushBorrow for Read<T> {
+    fn push_borrow(borrow: &mut Borrow) {
         borrow.reads.insert(TypeDef::of::<T>());
     }
 }
@@ -381,13 +382,13 @@ macro_rules! impl_register_borrow{
         impl<$($ty,)*> RegisterBorrow for ($($ty,)*)
         where
             $(
-                $ty: AddAccess,
+                $ty: PushBorrow,
             )*
         {
             fn register_borrow() -> Borrow {
                 let mut borrow = Borrow::new();
                 $(
-                    $ty::add_access(&mut borrow);
+                    $ty::push_borrow(&mut borrow);
                 )*
                 borrow
             }
