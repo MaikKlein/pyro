@@ -87,6 +87,8 @@ extern crate fnv;
 extern crate parking_lot;
 extern crate rayon;
 extern crate typedef;
+extern crate vec_map;
+use vec_map::VecMap;
 use downcast_rs::Downcast;
 use fnv::FnvHashMap;
 use itertools::{multizip, Zip};
@@ -99,33 +101,6 @@ use typedef::TypeDef;
 
 pub type StorageId = u16;
 pub type ComponentId = u32;
-
-/// Serves as an ID to lookup components for entities which can be in
-/// different storages.
-// [TODO]: Make `Entity` generic.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Entity {
-    /// Removing entities will increment the versioning. Accessing an entitiy with an
-    /// outdated version will result in a `panic`. `version` does wrap on overflow.
-    version: u16,
-    /// The id of the storage where the entitiy lives in
-    storage_id: StorageId,
-    /// The actual id inside a storage
-    id: ComponentId,
-}
-
-/// [`World`] is the heart of this library. It owns all the [`Component`]s and [`Storage`]s.
-/// It also manages entities and allows [`Component`]s to be safely queried.
-pub struct World<S = SoaStorage> {
-    /// Storages need to be linear, that is why deletion will use [`Vec::swap_remove`] under the
-    /// hood. But this moves the components around and we need to keep track of those swaps. This
-    /// map is then used to find the correct [`ComponentId`] for an [`Entity`].
-    component_map: Vec<FnvHashMap<ComponentId, ComponentId>>,
-    /// When we remove an [`Entity`], we will put it in this free map to be reused.
-    free_map: Vec<ComponentId>,
-    storages: Vec<S>,
-    runtime_borrow: Mutex<RuntimeBorrow>,
-}
 
 /// A simple Iterator that removes its borrows on drop.
 pub struct MatchIter<'s, S: Storage, I> {
@@ -152,6 +127,33 @@ where
         self.iter.next()
     }
 }
+
+/// Serves as an ID to lookup components for entities which can be in
+/// different storages.
+// [TODO]: Make `Entity` generic.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Entity {
+    /// Removing entities will increment the versioning. Accessing an entitiy with an
+    /// outdated version will result in a `panic`. `version` does wrap on overflow.
+    version: u16,
+    /// The id of the storage where the entitiy lives in
+    storage_id: StorageId,
+    /// The actual id inside a storage
+    id: ComponentId,
+}
+
+/// [`World`] is the heart of this library. It owns all the [`Component`]s and [`Storage`]s.
+/// It also manages entities and allows [`Component`]s to be safely queried.
+pub struct World<S = SoaStorage> {
+    /// Storages need to be linear, that is why deletion will use [`Vec::swap_remove`] under the
+    /// hood. But this moves the components around and we need to keep track of those swaps. This
+    /// map is then used to find the correct [`ComponentId`] for an [`Entity`].
+    component_map: Vec<VecMap<ComponentId>>,
+    /// When we remove an [`Entity`], we will put it in this free map to be reused.
+    free_map: Vec<ComponentId>,
+    storages: Vec<S>,
+    runtime_borrow: Mutex<RuntimeBorrow>,
+}
 impl<S> World<S>
 where
     S: Storage,
@@ -164,9 +166,9 @@ where
             .enumerate()
             .flat_map(move |(idx, inner)| {
                 let storage_id = idx as StorageId;
-                inner.keys().cloned().map(move |component_id| Entity {
+                inner.keys().map(move |component_id| Entity {
                     storage_id,
-                    id: component_id,
+                    id: component_id as ComponentId,
                     version: 0,
                 })
             })
@@ -177,7 +179,7 @@ where
     fn entities_storage(&self, storage_id: StorageId) -> impl Iterator<Item = Entity> {
         let mut map: Vec<_> = self.component_map[storage_id as usize]
             .iter()
-            .map(|(&a, &b)| (a, b))
+            .map(|(a, &b)| (a as ComponentId, b))
             .collect();
         map.sort_by(|(_, v1), (_, v2)| Ord::cmp(v1, v2));
         map.into_iter().map(move |(component_id, _)| Entity {
@@ -297,18 +299,19 @@ where
             let len = A::append_components(i, &mut storage);
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
-            self.component_map.push(FnvHashMap::default());
+            self.component_map.push(VecMap::default());
             (id, len)
         };
         // Inserting components is not enough, we also need to create the entity ids
         // for those components.
         let start_len = self.component_map[storage_id as usize].len() as ComponentId;
         let end_len = start_len + insert_count as ComponentId;
-        for id in start_len..end_len {
-            // If we have some unused ids, then we should use them
-            let insert_id = self.free_map.pop().unwrap_or(id);
-            self.component_map[storage_id as usize].insert(insert_id, id);
+        let free_map = &mut self.free_map;
+        let e = (start_len..end_len).map(move |id| (free_map.pop().unwrap_or(id), id));
+        for (at, id) in e {
+            self.component_map[storage_id as usize].insert(at as usize, id);
         }
+
     }
 
     pub fn remove_entities<I>(&mut self, entities: I)
@@ -317,20 +320,20 @@ where
     {
         for entity in entities {
             let storage_id = entity.storage_id as usize;
-            let component_id = self.component_map[storage_id][&entity.id];
+            let component_id = self.component_map[storage_id][entity.id as usize];
             // [FIXME]: This uses dynamic dispatch so we might want to batch entities
             // together to reduce the overhead.
             let swap = self.storages[storage_id].remove(component_id) as ComponentId;
             // We need to keep track which entity was deleted and which was swapped.
             if swap != component_id {
-                let (&key, _) = self.component_map[storage_id]
+                let (key, _) = self.component_map[storage_id]
                     .iter()
                     .find(|(key, &value)| value == swap)
                     .expect("Unable to update component id because it does not exist");
 
                 self.component_map[storage_id].insert(key, component_id);
             }
-            self.component_map[storage_id].remove(&entity.id);
+            self.component_map[storage_id].remove(entity.id as usize);
             self.free_map.push(entity.id);
         }
     }
