@@ -80,15 +80,16 @@
 //!
 //! # Getting started
 //!
-extern crate itertools;
-#[macro_use]
 extern crate downcast_rs;
+extern crate itertools;
+extern crate log;
 extern crate parking_lot;
 extern crate rayon;
 extern crate typedef;
 extern crate vec_map;
-use downcast_rs::Downcast;
+use downcast_rs::{impl_downcast, Downcast};
 use itertools::{multizip, Zip};
+use log::{debug, error};
 use parking_lot::Mutex;
 use std::any::TypeId;
 use std::cell::UnsafeCell;
@@ -161,7 +162,7 @@ pub struct World<S = SoaStorage> {
     /// map is then used to find the correct [`ComponentId`] for an [`Entity`].
     component_map: Vec<VecMap<ComponentId>>,
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
-    free_map: Vec<ComponentId>,
+    free_map: Vec<Vec<ComponentId>>,
     storages: Vec<S>,
     /// The runtime borrow system. See [`RuntimeBorrow`] for more information. It is also wrapped
     /// in a Mutex so that we can keep track of multiple borrows on different threads.
@@ -318,17 +319,37 @@ where
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
             self.component_map.push(VecMap::default());
+            self.free_map.push(Vec::new());
             (id, len)
         };
+        if insert_count == 0 {
+            return;
+        }
         // Inserting components is not enough, we also need to create the entity ids
         // for those components.
         let start_len = self.component_map[storage_id as usize].len() as ComponentId;
         let end_len = start_len + insert_count as ComponentId;
-        let free_map = &mut self.free_map;
-        let e = (start_len..end_len).map(move |id| (free_map.pop().unwrap_or(id), id));
-        for (at, id) in e {
-            self.component_map[storage_id as usize].insert(at as usize, id);
+        debug!("Append to Storage: {}", storage_id);
+        debug!("- Insert count: {}", insert_count);
+        debug!(
+            "- Map length before: {}",
+            self.component_map[storage_id as usize].len()
+        );
+        for component_id in start_len..end_len {
+            let insert_at = self.free_map[storage_id as usize]
+                .pop()
+                .unwrap_or(self.component_map[storage_id as usize].len() as ComponentId);
+            self.component_map[storage_id as usize].insert(insert_at as usize, component_id);
         }
+        debug!(
+            "- Map length after: {}",
+            self.component_map[storage_id as usize].len()
+        );
+        debug!(
+            "- Map size: {}, Storage size{}",
+            self.component_map[storage_id as usize].len(),
+            self.storages[storage_id as usize].len()
+        );
     }
 
     pub fn remove_entities<I>(&mut self, entities: I)
@@ -336,22 +357,38 @@ where
         I: IntoIterator<Item = Entity>,
     {
         for entity in entities {
+            debug!("Removing {:?}", entity);
             let storage_id = entity.storage_id as usize;
             let component_id = self.component_map[storage_id][entity.id as usize];
             // [FIXME]: This uses dynamic dispatch so we might want to batch entities
             // together to reduce the overhead.
             let swap = self.storages[storage_id].remove(component_id) as ComponentId;
             // We need to keep track which entity was deleted and which was swapped.
-            if swap != component_id {
-                let (key, _) = self.component_map[storage_id]
-                    .iter()
-                    .find(|(_, &value)| value == swap)
-                    .expect("Unable to update component id because it does not exist");
+            debug!(
+                "- Entitiy id: {}, Component id: {}, Swap: {}, Map length: {}, Storage length: {}",
+                entity.id,
+                component_id,
+                swap,
+                self.storages[storage_id].len() + 1,
+                self.component_map[storage_id].len()
+            );
+            let (key, _) = self.component_map[storage_id]
+                .iter()
+                .find(|(_, &value)| value == swap)
+                .unwrap_or_else(|| {
+                    error!(
+                        "Unable to update component id {} because it does not exist",
+                        component_id
+                    );
+                    debug!("{:?}", self.component_map[storage_id]);
+                    panic!("")
+                });
 
-                self.component_map[storage_id].insert(key, component_id);
-            }
+            debug!("- Updating {} to {}", key, component_id);
+            self.component_map[storage_id].insert(key, component_id);
+            debug!("- Removing {} from `component_map`", entity.id);
             self.component_map[storage_id].remove(entity.id as usize);
-            self.free_map.push(entity.id);
+            self.free_map[storage_id].push(entity.id);
         }
     }
 }
@@ -406,7 +443,7 @@ impl_register_borrow!(A, B, C, D, E, F);
 impl_register_borrow!(A, B, C, D, E, F, G);
 impl_register_borrow!(A, B, C, D, E, F, G, H);
 
-/// Rusts borrowing rules are flexible enough for an ECS. Often it would prefered to nest multiple
+/// Rust's borrowing rules are not flexible enough for an ECS. Often it would prefered to nest multiple
 /// query like [`World::matcher`], but this is not possible if both borrows would be mutable.
 /// Instead we track active borrows at runtime. Multiple reads are allowed but `read/write` and
 /// `write/write` are not.
@@ -420,7 +457,7 @@ impl RuntimeBorrow {
         }
     }
 
-    /// Creates and pushes an [`Borrow`] on to the stack. 
+    /// Creates and pushes an [`Borrow`] on to the stack.
     pub fn push_access<R: RegisterBorrow>(&mut self) {
         let borrow = R::register_borrow();
         self.borrows.push(borrow);

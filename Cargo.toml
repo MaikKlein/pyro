@@ -16,6 +16,7 @@ downcast-rs = "1.0"
 fnv = "1.0"
 parking_lot = "0.6"
 vec_map = "0.8"
+log = "0.4"
 [dependencies.typedef]
 version = "0.3"
 features = ["nightly"]
