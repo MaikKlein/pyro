@@ -101,6 +101,7 @@ use vec_map::VecMap;
 
 pub type StorageId = u16;
 pub type ComponentId = u32;
+pub type Version = u16;
 
 /// The [`Iterator`] is used to end a borrow from a query like [`World::matcher`].
 pub struct BorrowIter<'s, S, I> {
@@ -147,7 +148,7 @@ impl<'s, S, I> Drop for BorrowIter<'s, S, I> {
 pub struct Entity {
     /// Removing entities will increment the versioning. Accessing an entitiy with an
     /// outdated version will result in a `panic`. `version` does wrap on overflow.
-    version: u16,
+    version: Version,
     /// The id of the storage where the entitiy lives in
     storage_id: StorageId,
     /// The actual id inside a storage
@@ -163,6 +164,7 @@ pub struct World<S = SoaStorage> {
     component_map: Vec<VecMap<ComponentId>>,
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<Vec<ComponentId>>,
+    version: Vec<Vec<Version>>,
     storages: Vec<S>,
     /// The runtime borrow system. See [`RuntimeBorrow`] for more information. It is also wrapped
     /// in a Mutex so that we can keep track of multiple borrows on different threads.
@@ -189,8 +191,9 @@ where
     }
     // Slightly awkward implementation. We always iterate linear but removing components will
     // make the entities inside the `component_map` non linear. We have to actually sort the keys
-    // with the values.
-    fn entities_storage(&self, storage_id: StorageId) -> impl Iterator<Item = Entity> {
+    // with the values. We should maintain a bidirectonal map so that we can look up the correct
+    // order without needing to sort.
+    fn entities_storage<'s>(&'s self, storage_id: StorageId) -> impl Iterator<Item = Entity> + 's {
         let mut map: Vec<_> = self.component_map[storage_id as usize]
             .iter()
             .map(|(a, &b)| (a as ComponentId, b))
@@ -199,7 +202,7 @@ where
         map.into_iter().map(move |(component_id, _)| Entity {
             storage_id,
             id: component_id,
-            version: 0,
+            version: self.version[storage_id as usize][component_id as usize],
         })
     }
     fn borrow_and_validate<Borrow: RegisterBorrow>(&self) {
@@ -290,6 +293,7 @@ where
             runtime_borrow: Mutex::new(RuntimeBorrow::new()),
             component_map: Vec::new(),
             free_map: Vec::new(),
+            version: Vec::new(),
             storages: Vec::new(),
         }
     }
@@ -320,14 +324,16 @@ where
             // Also we need to add an entity Vec for that storage
             self.component_map.push(VecMap::default());
             self.free_map.push(Vec::new());
+            self.version.push(Vec::new());
             (id, len)
         };
+        let storage_index = storage_id as usize;
         if insert_count == 0 {
             return;
         }
         // Inserting components is not enough, we also need to create the entity ids
         // for those components.
-        let start_len = self.component_map[storage_id as usize].len() as ComponentId;
+        let start_len = self.component_map[storage_index].len() as ComponentId;
         let end_len = start_len + insert_count as ComponentId;
         debug!("Append to Storage: {}", storage_id);
         debug!("- Insert count: {}", insert_count);
@@ -336,22 +342,33 @@ where
             self.component_map[storage_id as usize].len()
         );
         for component_id in start_len..end_len {
-            let insert_at = self.free_map[storage_id as usize]
-                .pop()
-                .unwrap_or(self.component_map[storage_id as usize].len() as ComponentId);
-            self.component_map[storage_id as usize].insert(insert_at as usize, component_id);
+            if let Some(insert_at) = self.free_map[storage_index].pop() {
+                // When we create a new entity that has already been deleted once, we need to
+                // increment the version.
+                self.version[storage_index][insert_at as usize] += 1;
+                self.component_map[storage_index].insert(insert_at as usize, component_id);
+            } else {
+                // If the free list is empty, then we can insert it at the end.
+                let insert_at = self.component_map[storage_index].len();
+                self.version[storage_index].push(0);
+                self.component_map[storage_index].insert(insert_at, component_id);
+            }
         }
-        debug!(
-            "- Map length after: {}",
-            self.component_map[storage_id as usize].len()
-        );
-        debug!(
-            "- Map size: {}, Storage size{}",
-            self.component_map[storage_id as usize].len(),
-            self.storages[storage_id as usize].len()
+        assert_eq!(
+            self.component_map[storage_index].len(),
+            self.storages[storage_index].len(),
+            "The size of the component map and storage map should be equal"
         );
     }
 
+    /// Compares the version of the entity with the version in [`World`] and returns true if they
+    /// match. Because `version` wraps around this is not a hard guarantee.
+    pub fn is_entity_valid(&self, entity: Entity) -> bool {
+        self.version[entity.storage_id as usize]
+            .get(entity.id as usize)
+            .map(|&version| version == entity.version)
+            .unwrap_or(false)
+    }
     pub fn remove_entities<I>(&mut self, entities: I)
     where
         I: IntoIterator<Item = Entity>,
@@ -359,6 +376,8 @@ where
         for entity in entities {
             debug!("Removing {:?}", entity);
             let storage_id = entity.storage_id as usize;
+            let is_valid = self.is_entity_valid(entity);
+            assert!(is_valid, "Found an invalid Entitity");
             let component_id = self.component_map[storage_id][entity.id as usize];
             // [FIXME]: This uses dynamic dispatch so we might want to batch entities
             // together to reduce the overhead.
