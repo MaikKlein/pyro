@@ -96,6 +96,7 @@ use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
+use std::num::Wrapping;
 use typedef::TypeDef;
 use vec_map::VecMap;
 
@@ -148,7 +149,7 @@ impl<'s, S, I> Drop for BorrowIter<'s, S, I> {
 pub struct Entity {
     /// Removing entities will increment the versioning. Accessing an entitiy with an
     /// outdated version will result in a `panic`. `version` does wrap on overflow.
-    version: Version,
+    version: Wrapping<Version>,
     /// The id of the storage where the entitiy lives in
     storage_id: StorageId,
     /// The actual id inside a storage
@@ -164,7 +165,7 @@ pub struct World<S = SoaStorage> {
     component_map: Vec<VecMap<ComponentId>>,
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<Vec<ComponentId>>,
-    version: Vec<Vec<Version>>,
+    version: Vec<Vec<Wrapping<Version>>>,
     storages: Vec<S>,
     /// The runtime borrow system. See [`RuntimeBorrow`] for more information. It is also wrapped
     /// in a Mutex so that we can keep track of multiple borrows on different threads.
@@ -185,7 +186,7 @@ where
                 inner.keys().map(move |component_id| Entity {
                     storage_id,
                     id: component_id as ComponentId,
-                    version: 0,
+                    version: self.version[storage_id as usize][component_id as usize],
                 })
             })
     }
@@ -345,12 +346,12 @@ where
             if let Some(insert_at) = self.free_map[storage_index].pop() {
                 // When we create a new entity that has already been deleted once, we need to
                 // increment the version.
-                self.version[storage_index][insert_at as usize] += 1;
+                self.version[storage_index][insert_at as usize] += Wrapping(1);
                 self.component_map[storage_index].insert(insert_at as usize, component_id);
             } else {
                 // If the free list is empty, then we can insert it at the end.
                 let insert_at = self.component_map[storage_index].len();
-                self.version[storage_index].push(0);
+                self.version[storage_index].push(Wrapping(0));
                 self.component_map[storage_index].insert(insert_at, component_id);
             }
         }
