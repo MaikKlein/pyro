@@ -2,7 +2,7 @@
 //! An Entity Component System or *ECS* is very similar to a relational database like * SQL*. The
 //! [`World`] is the data store where game objects (also known as [`Entity`]) live. An [`Entity`]
 //! contains data or [`Component`]s.
-//! The entiy component system can efficiently query those components.
+//! The *ECS* can efficiently query those components.
 //!
 //! > Give me all entities that have a position and velocity component, and then update the position
 //! based on the velocity.
@@ -182,9 +182,12 @@ where
             })
     }
 
+    /// Pushes a new borrow on the stack and checks if there are any illegal overlapping borrows
+    /// such as Write/Write and Read/Write.
     fn borrow_and_validate<Borrow: RegisterBorrow>(&self) {
         let mut borrow = self.runtime_borrow.lock();
         borrow.push_access::<Borrow>();
+        // TODO: Implement a better error message.
         if let Err(overlapping_borrows) = borrow.validate() {
             panic!("Detected multiple active borrows of: {:?}", {
                 overlapping_borrows
@@ -358,6 +361,9 @@ where
         self.component_map[storage_id as usize].insert(id as usize, component_id);
         self.component_map_inv[storage_id as usize].insert(component_id as usize, id);
     }
+
+    /// Removes the specified entities from [`World`]. Those entities are now considered invalid,
+    /// which can be checked with [`World::is_entity_valid`].
     pub fn remove_entities<I>(&mut self, entities: I)
     where
         I: IntoIterator<Item = Entity>,
