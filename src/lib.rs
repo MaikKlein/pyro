@@ -66,7 +66,7 @@ extern crate typedef;
 extern crate vec_map;
 use downcast_rs::{impl_downcast, Downcast};
 use itertools::{multizip, Zip};
-use log::{debug, error};
+use log::debug;
 use parking_lot::Mutex;
 use std::any::TypeId;
 use std::cell::UnsafeCell;
