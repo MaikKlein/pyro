@@ -138,8 +138,10 @@ pub struct Entity {
 pub struct World<S = SoaStorage> {
     /// Storages need to be linear, that is why deletion will use [`Vec::swap_remove`] under the
     /// hood. But this moves the components around and we need to keep track of those swaps. This
-    /// map is then used to find the correct [`ComponentId`] for an [`Entity`].
+    /// map is then used to find the correct [`ComponentId`] for an [`Entity`]. This maps the
+    /// entity id to the real storage id.
     component_map: Vec<VecMap<ComponentId>>,
+    /// This is the opposite of `component_map`. This maps the storage id to the entity id.
     component_map_inv: Vec<VecMap<ComponentId>>,
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<Vec<ComponentId>>,
@@ -170,6 +172,7 @@ where
     }
 
     fn entities_storage<'s>(&'s self, storage_id: StorageId) -> impl Iterator<Item = Entity> + 's {
+        // We iterate with the `component_map_inv`, because that is the order of the real storage.
         self.component_map_inv[storage_id as usize]
             .values()
             .map(move |&id| Entity {
@@ -345,6 +348,7 @@ where
             .map(|&version| version == entity.version)
             .unwrap_or(false)
     }
+
     fn insert_component_map(
         &mut self,
         storage_id: StorageId,
@@ -376,12 +380,20 @@ where
                 self.storages[storage_id].len() + 1,
                 self.component_map[storage_id].len()
             );
+
+            // We need to look up the id that got swapped
             let key = self.component_map_inv[storage_id][swap as usize];
             debug!("- Updating {} to {}", key, component_id);
+            // The id that was swapped should now point to the component_id that was removed
             self.insert_component_map(storage_id as StorageId, key, component_id);
             debug!("- Removing {} from `component_map`", entity.id);
+            // Now we consider the id to be deleted and remove it from the `component_map`.
             self.component_map[storage_id as usize].remove(entity.id as usize);
+            // We also need to update our `component_inverse_map`. `swap` was the real location
+            // that was deleted in the underlying `storage` and we need to remove it.
             self.component_map_inv[storage_id as usize].remove(swap as usize);
+            // And we need to append the remove id to the free map so we can reuse it again when we
+            // `append_components`.
             self.free_map[storage_id].push(entity.id);
         }
     }
