@@ -1,8 +1,7 @@
 //! # What is an Entity Component System?
-//! A game will have entities (gameobjects) in the world. Those entities can have a set
-//! of components. A component is just data. Example for a component could be `Position`, `Velocity`, `Heath` etc.
-//! Each entity can have a different set of components.
-//!
+//! An Entity Component System or *ECS* is very similar to a relational database like * SQL*. The
+//! [`World`] is the data store where game objects (also known as [`Entity`]) live. An [`Entity`]
+//! contains data or [`Component`]s.
 //! The entiy component system can efficiently query those components.
 //!
 //! > Give me all entities that have a position and velocity component, and then update the position
@@ -10,6 +9,8 @@
 //!
 //! ```rust,ignore
 //! type PosVelQuery = (Write<Pos>, Read<Vel>);
+//! //                  ^^^^^       ^^^^
+//! //                  Mutable     Immutable
 //! world.matcher::<All<PosVelQuery>>().for_each(|(pos, vel)|{
 //!     pos += vel;
 //! })
@@ -46,33 +47,9 @@
 //! The jump is something like a chain of two iterators. We look at all the storages
 //! that match specific query. If the query would be `Write<Position>`, then we would
 //! look for all the storages that contain a position array, extract the iterators and chain them
-//! together. [`Write`] in this content means that the iterator will be mutable, while
-//! [`Read`] will create an immutable iterator.
 //!
-//!
-//! Every combination of components will be a separate storage. This guarantees that iteration
+//! Every combination of components will be in a separate storage. This guarantees that iteration
 //! will always be linear.
-//!
-//!
-//! # Performance
-//!
-//! * **Iteration**: Extremely fast if each storage contains at least a few entities. For example
-//! if a storage would contain only a single entity, then the performance wouldn't be better than a
-//! linked list. At the moment there is only on storage `SoaStorage`. `SoA` is very good default
-//! and you will most likely always want to use it. Different storages like `AOSOA` are planed. SoA
-//! starts to decrease in performance when you iterate over a lot of different components.
-//!
-//! * **Insertion**: Very fast if you insert many entities at once. Entities can be added in an
-//! AoS like fashion. This then gets translated to SoA which requires N allocations, where N is the
-//! number of component types that you are inserting. Inserting single entities at a time is very
-//! slow right now because the overhead of looking up the correct storages is very slow.
-//!
-//!* **Deletion**: Not implemented yet. Deletion in bulk will be fast while deletion of single
-//!entities might be slow.
-//!
-//!* **Adding/Removing components**: Not yet implemented. Because iteration is always linear,
-//!adding another component to an entity will move the entity to a different storage. This means
-//!that all components will need to be moved into the new storage (shallow copy).
 //!
 //! # Benchmarks
 //!
@@ -163,6 +140,7 @@ pub struct World<S = SoaStorage> {
     /// hood. But this moves the components around and we need to keep track of those swaps. This
     /// map is then used to find the correct [`ComponentId`] for an [`Entity`].
     component_map: Vec<VecMap<ComponentId>>,
+    component_map_inv: Vec<VecMap<ComponentId>>,
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<Vec<ComponentId>>,
     version: Vec<Vec<Wrapping<Version>>>,
@@ -190,22 +168,17 @@ where
                 })
             })
     }
-    // Slightly awkward implementation. We always iterate linear but removing components will
-    // make the entities inside the `component_map` non linear. We have to actually sort the keys
-    // with the values. We should maintain a bidirectonal map so that we can look up the correct
-    // order without needing to sort.
+
     fn entities_storage<'s>(&'s self, storage_id: StorageId) -> impl Iterator<Item = Entity> + 's {
-        let mut map: Vec<_> = self.component_map[storage_id as usize]
-            .iter()
-            .map(|(a, &b)| (a as ComponentId, b))
-            .collect();
-        map.sort_by(|(_, v1), (_, v2)| Ord::cmp(v1, v2));
-        map.into_iter().map(move |(component_id, _)| Entity {
-            storage_id,
-            id: component_id,
-            version: self.version[storage_id as usize][component_id as usize],
-        })
+        self.component_map_inv[storage_id as usize]
+            .values()
+            .map(move |&id| Entity {
+                storage_id,
+                id,
+                version: self.version[storage_id as usize][id as usize],
+            })
     }
+
     fn borrow_and_validate<Borrow: RegisterBorrow>(&self) {
         let mut borrow = self.runtime_borrow.lock();
         borrow.push_access::<Borrow>();
@@ -293,6 +266,7 @@ where
         World {
             runtime_borrow: Mutex::new(RuntimeBorrow::new()),
             component_map: Vec::new(),
+            component_map_inv: Vec::new(),
             free_map: Vec::new(),
             version: Vec::new(),
             storages: Vec::new(),
@@ -324,6 +298,7 @@ where
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
             self.component_map.push(VecMap::default());
+            self.component_map_inv.push(VecMap::default());
             self.free_map.push(Vec::new());
             self.version.push(Vec::new());
             (id, len)
@@ -347,12 +322,12 @@ where
                 // When we create a new entity that has already been deleted once, we need to
                 // increment the version.
                 self.version[storage_index][insert_at as usize] += Wrapping(1);
-                self.component_map[storage_index].insert(insert_at as usize, component_id);
+                self.insert_component_map(storage_id, insert_at, component_id);
             } else {
                 // If the free list is empty, then we can insert it at the end.
-                let insert_at = self.component_map[storage_index].len();
+                let insert_at = self.component_map[storage_index].len() as ComponentId;
                 self.version[storage_index].push(Wrapping(0));
-                self.component_map[storage_index].insert(insert_at, component_id);
+                self.insert_component_map(storage_id, insert_at, component_id);
             }
         }
         assert_eq!(
@@ -369,6 +344,15 @@ where
             .get(entity.id as usize)
             .map(|&version| version == entity.version)
             .unwrap_or(false)
+    }
+    fn insert_component_map(
+        &mut self,
+        storage_id: StorageId,
+        id: ComponentId,
+        component_id: ComponentId,
+    ) {
+        self.component_map[storage_id as usize].insert(id as usize, component_id);
+        self.component_map_inv[storage_id as usize].insert(component_id as usize, id);
     }
     pub fn remove_entities<I>(&mut self, entities: I)
     where
@@ -392,22 +376,12 @@ where
                 self.storages[storage_id].len() + 1,
                 self.component_map[storage_id].len()
             );
-            let (key, _) = self.component_map[storage_id]
-                .iter()
-                .find(|(_, &value)| value == swap)
-                .unwrap_or_else(|| {
-                    error!(
-                        "Unable to update component id {} because it does not exist",
-                        component_id
-                    );
-                    debug!("{:?}", self.component_map[storage_id]);
-                    panic!("")
-                });
-
+            let key = self.component_map_inv[storage_id][swap as usize];
             debug!("- Updating {} to {}", key, component_id);
-            self.component_map[storage_id].insert(key, component_id);
+            self.insert_component_map(storage_id as StorageId, key, component_id);
             debug!("- Removing {} from `component_map`", entity.id);
-            self.component_map[storage_id].remove(entity.id as usize);
+            self.component_map[storage_id as usize].remove(entity.id as usize);
+            self.component_map_inv[storage_id as usize].remove(swap as usize);
             self.free_map[storage_id].push(entity.id);
         }
     }
@@ -729,32 +703,6 @@ impl<T> UnsafeStorage<T> {
     }
 }
 
-pub trait ComponentList: Sized {
-    const SIZE: usize;
-    type Components;
-}
-
-macro_rules! impl_component_list {
-    ($size: expr => $($ty: ident),*) => {
-        impl<$($ty,)*> ComponentList for ($($ty,)*) {
-            const SIZE: usize = $size;
-            type Components = ($($ty,)*);
-        }
-    }
-}
-
-impl_component_list!(1  => A);
-impl_component_list!(2  => A, B);
-impl_component_list!(3  => A, B, C);
-impl_component_list!(4  => A, B, C, D);
-impl_component_list!(5  => A, B, C, D, E);
-impl_component_list!(6  => A, B, C, D, E, F);
-impl_component_list!(7  => A, B, C, D, E, F, G);
-impl_component_list!(8  => A, B, C, D, E, F, G, H);
-// impl_component_list!(9  => A, B, C, D, E, F, G, H, I);
-// impl_component_list!(10 => A, B, C, D, E, F, G, H, I, J);
-// impl_component_list!(11 => A, B, C, D, E, F, G, H, I, J, k);
-
 pub trait IteratorSoa: Sized {
     type Output;
     fn to_soa<I: Iterator<Item = Self>>(iter: I) -> Self::Output;
@@ -800,46 +748,46 @@ impl_iterator_soa!(
     (g, G),
     (h, H)
 );
-// impl_iterator_soa!(
-//     (a, A),
-//     (b, B),
-//     (c, C),
-//     (d, D),
-//     (e, E),
-//     (f, F),
-//     (g, G),
-//     (h, H),
-//     (i, I)
-// );
-// impl_iterator_soa!(
-//     (a, A),
-//     (b, B),
-//     (c, C),
-//     (d, D),
-//     (e, E),
-//     (f, F),
-//     (g, G),
-//     (h, H),
-//     (i, I),
-//     (j, J)
-// );
-// impl_iterator_soa!(
-//     (a, A),
-//     (b, B),
-//     (c, C),
-//     (d, D),
-//     (e, E),
-//     (f, F),
-//     (g, G),
-//     (h, H),
-//     (i, I),
-//     (j, J),
-//     (k, K)
-// );
+impl_iterator_soa!(
+    (a, A),
+    (b, B),
+    (c, C),
+    (d, D),
+    (e, E),
+    (f, F),
+    (g, G),
+    (h, H),
+    (i, I)
+);
+impl_iterator_soa!(
+    (a, A),
+    (b, B),
+    (c, C),
+    (d, D),
+    (e, E),
+    (f, F),
+    (g, G),
+    (h, H),
+    (i, I),
+    (j, J)
+);
+impl_iterator_soa!(
+    (a, A),
+    (b, B),
+    (c, C),
+    (d, D),
+    (e, E),
+    (f, F),
+    (g, G),
+    (h, H),
+    (i, I),
+    (j, J),
+    (k, K)
+);
 
 pub trait AppendComponents
 where
-    Self: ComponentList + IteratorSoa,
+    Self: IteratorSoa,
 {
     fn is_match<S: Storage>(storage: &S) -> bool;
     fn append_components<I, S>(items: I, storage: &mut S) -> usize
@@ -891,9 +839,9 @@ impl_append_components!(5  => A, B, C, D, E);
 impl_append_components!(6  => A, B, C, D, E, F);
 impl_append_components!(7  => A, B, C, D, E, F, G);
 impl_append_components!(8  => A, B, C, D, E, F, G, H);
-// impl_append_components!(9  => A, B, C, D, E, F, G, H, I);
-// impl_append_components!(10 => A, B, C, D, E, F, G, H, I, J);
-// impl_append_components!(11 => A, B, C, D, E, F, G, H, I, J, k);
+impl_append_components!(9  => A, B, C, D, E, F, G, H, I);
+impl_append_components!(10 => A, B, C, D, E, F, G, H, I, J);
+impl_append_components!(11 => A, B, C, D, E, F, G, H, I, J, K);
 
 /// A runtime SoA storage. It stands for **S**tructure **o**f **A**rrays.
 ///
