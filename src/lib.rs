@@ -728,7 +728,7 @@ pub trait BuildStorage {
 
 macro_rules! impl_build_storage {
     ($($ty: ident),*) => {
-        impl<$($ty),*> BuildStorage for ($($ty),*)
+        impl<$($ty),*> BuildStorage for ($($ty,)*)
         where
             $(
                 $ty:Component,
@@ -744,6 +744,7 @@ macro_rules! impl_build_storage {
         }
     }
 }
+impl_build_storage!(A);
 impl_build_storage!(A, B);
 impl_build_storage!(A, B, C);
 impl_build_storage!(A, B, C, D);
