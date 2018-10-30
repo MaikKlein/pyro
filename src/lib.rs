@@ -821,7 +821,7 @@ macro_rules! impl_iterator_soa {
                     #[allow(non_snake_case)]
                     let mut $ty = Vec::new();
                 )*
-                for ($($item),*) in iter {
+                for ($($item,)*) in iter {
                     $(
                         $ty.push($item);
                     )*
@@ -832,6 +832,7 @@ macro_rules! impl_iterator_soa {
     }
 }
 
+impl_iterator_soa!((a, A));
 impl_iterator_soa!((a, A), (b, B));
 impl_iterator_soa!((a, A), (b, B), (c, C));
 impl_iterator_soa!((a, A), (b, B), (c, C), (d, D));
@@ -932,6 +933,7 @@ macro_rules! impl_append_components {
     }
 }
 
+impl_append_components!(1  => A);
 impl_append_components!(2  => A, B);
 impl_append_components!(3  => A, B, C);
 impl_append_components!(4  => A, B, C, D);
