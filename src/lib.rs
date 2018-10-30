@@ -201,6 +201,27 @@ pub struct World<S = SoaStorage> {
     /// in a Mutex so that we can keep track of multiple borrows on different threads.
     runtime_borrow: Mutex<RuntimeBorrow>,
 }
+
+impl<S> Default for World<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> World<S> {
+    /// Creates an empty [`World`].
+    pub fn new() -> Self {
+        World {
+            runtime_borrow: Mutex::new(RuntimeBorrow::new()),
+            component_map: Vec::new(),
+            component_map_inv: Vec::new(),
+            free_map: Vec::new(),
+            version: Vec::new(),
+            storages: Vec::new(),
+        }
+    }
+}
+
 impl<S> World<S>
 where
     S: Storage,
@@ -317,17 +338,6 @@ impl<S> World<S>
 where
     S: Storage + RegisterComponent,
 {
-    /// Creates an empty [`World`].
-    pub fn new() -> Self {
-        World {
-            runtime_borrow: Mutex::new(RuntimeBorrow::new()),
-            component_map: Vec::new(),
-            component_map_inv: Vec::new(),
-            free_map: Vec::new(),
-            version: Vec::new(),
-            storages: Vec::new(),
-        }
-    }
     /// Appends the components and also creates the necessary [`Entity`]s behind the scenes.
     /// If you only want to append a single set of components then you can do
     /// ```rust,ignore
@@ -463,17 +473,22 @@ pub trait RegisterBorrow {
 /// Is implemented for [`Read`] and [`Write`] and is used to insert reads and writes into the
 /// correct [`HashSet`].
 pub trait PushBorrow {
-    fn push_borrow(acccess: &mut Borrow);
+    /// Inserts a new borrow and returns true if it was successful.
+    fn push_borrow(acccess: &mut Borrow) -> bool;
 }
 impl<T: Component> PushBorrow for Write<T> {
-    fn push_borrow(borrow: &mut Borrow) {
-        borrow.writes.insert(TypeDef::of::<T>());
+    /// If a `Write` was already in a set, then we have detected multiple writes and this is not
+    /// allows.
+    fn push_borrow(borrow: &mut Borrow) -> bool {
+        borrow.writes.insert(TypeDef::of::<T>())
     }
 }
 
 impl<T: Component> PushBorrow for Read<T> {
-    fn push_borrow(borrow: &mut Borrow) {
+    /// Multiple reads are always allowed and therefor we can always return true
+    fn push_borrow(borrow: &mut Borrow) -> bool {
         borrow.reads.insert(TypeDef::of::<T>());
+        true
     }
 }
 
@@ -487,9 +502,12 @@ macro_rules! impl_register_borrow{
         {
             fn register_borrow() -> Borrow {
                 let mut borrow = Borrow::new();
+                let success =
                 $(
-                    $ty::push_borrow(&mut borrow);
-                )*
+                    $ty::push_borrow(&mut borrow)
+                )&&*;
+                // TODO: Output a more meaningful error
+                assert!(success, "Detected multiple writes");
                 borrow
             }
         }
@@ -512,6 +530,13 @@ impl_register_borrow!(A, B, C, D, E, F, G, H);
 pub struct RuntimeBorrow {
     borrows: Vec<Borrow>,
 }
+
+impl Default for RuntimeBorrow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeBorrow {
     pub fn new() -> Self {
         Self {
@@ -547,7 +572,7 @@ impl RuntimeBorrow {
                     }).collect();
                 reads.chain(rest)
             }).collect();
-        if overlapping_borrows.len() == 0 {
+        if overlapping_borrows.is_empty() {
             Ok(())
         } else {
             Err(overlapping_borrows)
@@ -558,6 +583,12 @@ impl RuntimeBorrow {
 pub struct Borrow {
     reads: HashSet<TypeDef>,
     writes: HashSet<TypeDef>,
+}
+
+impl Default for Borrow {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Borrow {

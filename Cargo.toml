@@ -16,9 +16,14 @@ downcast-rs = "1.0"
 parking_lot = "0.6"
 vec_map = "0.8"
 log = "0.4"
+
+[features]
+default = []
+better-errors = ["typedef/nightly"]
+
 [dependencies.typedef]
 version = "0.3"
-features = ["nightly"]
+default-features = false
 
 
 [dev-dependencies]
@@ -28,3 +33,5 @@ rand = "0.5"
 [profile.bench]
 opt-level = 3
 debug=true
+
+
