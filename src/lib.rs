@@ -1,5 +1,5 @@
 //! # What is an Entity Component System?
-//! An Entity Component System or *ECS* is very similar to a relational database like * SQL*. The
+//! An Entity Component System or *ECS* is very similar to a relational database like *SQL*. The
 //! [`World`] is the data store where game objects (also known as [`Entity`]) live. An [`Entity`]
 //! contains data or [`Component`]s.
 //! The *ECS* can efficiently query those components.
@@ -15,7 +15,15 @@
 //!     pos += vel;
 //! })
 //! ```
+//!
 //! # Internals
+//! ## Overview
+//! * Iteration is always **linear**.
+//! * Different component combinations live in a separate storage
+//! * Removing entities does not create holes.
+//! * All operations are designed to be used in bulk.
+//! * Borrow rules are enforced at runtime. See [`RuntimeBorrow`]
+//! * [`Entity`] is using a wrapping generational index. See [`Entity::version`]
 //!
 //! ```ignore
 //!// A Storage that contains `Pos`, `Vel`, `Health`.
@@ -38,7 +46,7 @@
 //! The iteration pattern from the query above would be
 //!
 //!
-//! ```
+//! ```ignore
 //! positions:  [Pos1, Pos2, Pos3, .., PosN], [Pos1, Pos2, Pos3, .., PosM]
 //! velocities: [Vel1, Vel2, Vel3, .., VelN], [Vel1, Vel2, Vel3, .., VelM]
 //!                                         ^
@@ -57,6 +65,48 @@
 //!
 //! # Getting started
 //!
+//! ```
+//! extern crate pyro;
+//! use pyro::{ World, Entity, Read, Write, All, SoaStorage };
+//! struct Position;
+//! struct Velocity;
+//!
+//!
+//! // By default creates a world backed by a [`SoaStorage`]
+//! let mut world: World<SoaStorage> = World::new();
+//! let add_pos_vel = (0..99).map(|_| (Position{}, Velocity{}));
+//! //                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+//! //                                 A tuple of (Position, Velocity),
+//! //                                 Note: Order does *not* matter
+//!
+//! // Appends 99 entities with a Position and Velocity component.
+//! world.append_components(add_pos_vel);
+//!
+//! // Appends a single entity
+//! world.append_components(Some((Position{}, Velocity{})));
+//!
+//! // Requests a mutable borrow to Position, and an immutable borrow to Velocity.
+//! // Common queries can be reused with a typedef like this but it is not necessary.
+//! type PosVelQuery = (Write<Position>, Read<Velocity>);
+//!
+//! // Retrieves all entities that have a Position and Velocity component as an iterator.
+//! world.matcher::<All<PosVelQuery>>().for_each(|(pos, vel)|{
+//!    // ...
+//! });
+//!
+//! // The same query as above but also retrieves the entities and collects the entities into a
+//! // `Vec<Entity>`.
+//! let entities: Vec<Entity> =
+//!     world.matcher_with_entities::<All<PosVelQuery>>()
+//!     .filter_map(|(entity, (pos, vel))|{
+//!         Some(entity)
+//!     }).collect();
+//!
+//! // Removes all the entities
+//! world.remove_entities(entities);
+//! let count = world.matcher::<All<PosVelQuery>>().count();
+//! assert_eq!(count, 0);
+//! ```
 extern crate downcast_rs;
 extern crate itertools;
 extern crate log;
@@ -124,10 +174,10 @@ impl<'s, S, I> Drop for BorrowIter<'s, S, I> {
 // [TODO]: Make `Entity` generic.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Entity {
-    /// Removing entities will increment the versioning. Accessing an entitiy with an
+    /// Removing entities will increment the versioning. Accessing an [`Entity`] with an
     /// outdated version will result in a `panic`. `version` does wrap on overflow.
     version: Wrapping<Version>,
-    /// The id of the storage where the entitiy lives in
+    /// The id of the storage where the [`Entity`] lives in
     storage_id: StorageId,
     /// The actual id inside a storage
     id: ComponentId,
@@ -225,7 +275,7 @@ where
                 .flat_map(|iter| iter)
         };
         // [FIXME]: BorrowIter is more than 2x slower, than just returning `iter` here for the
-        // `ecs_bench`. Mayhe the benchmark is too simple?
+        // `ecs_bench`. Maybe the benchmark is too simple?
         BorrowIter { world: self, iter }
     }
     /// Same as [`World::matcher`] but also returns the corresponding [`Entity`].
@@ -281,7 +331,7 @@ where
     /// Appends the components and also creates the necessary [`Entity`]s behind the scenes.
     /// If you only want to append a single set of components then you can do
     /// ```rust,ignore
-    /// world.append_components(Some((a, b, c)))`;
+    /// world.append_components(Some((a, b, c)));
     /// ```
     pub fn append_components<A, I>(&mut self, i: I)
     where
@@ -455,8 +505,8 @@ impl_register_borrow!(A, B, C, D, E, F);
 impl_register_borrow!(A, B, C, D, E, F, G);
 impl_register_borrow!(A, B, C, D, E, F, G, H);
 
-/// Rust's borrowing rules are not flexible enough for an ECS. Often it would prefered to nest multiple
-/// query like [`World::matcher`], but this is not possible if both borrows would be mutable.
+/// Rust's borrowing rules are not flexible enough for an *ECS*. Often it would preferred to nest multiple
+/// queries like [`World::matcher`], but this is not possible if both borrows would be mutable.
 /// Instead we track active borrows at runtime. Multiple reads are allowed but `read/write` and
 /// `write/write` are not.
 pub struct RuntimeBorrow {
@@ -561,7 +611,7 @@ pub trait Query<'s> {
 }
 
 /// Is satisfied when a storages contains all of the specified components.
-/// ```rust,ingore
+/// ```rust,ignore
 /// type Query = All<(Write<Position>, Read<Velocity>)>;
 /// ```
 pub struct All<'s, Tuple>(pub PhantomData<&'s Tuple>);
@@ -904,7 +954,7 @@ impl RegisterComponent for SoaStorage {
     }
 }
 
-/// [`Storage`] allows to abstract over differnt types of storages. The most common storage that
+/// [`Storage`] allows to abstract over different types of storages. The most common storage that
 /// implements this trait is [`SoaStorage`].
 pub trait Storage: Sized {
     fn len(&self) -> usize;
@@ -931,7 +981,7 @@ pub trait Storage: Sized {
 }
 
 impl SoaStorage {
-    /// Convinence method to easily access an [`UnsafeStorage`].
+    /// Convenience method to easily access an [`UnsafeStorage`].
     fn get_storage<C: Component>(&self) -> &UnsafeStorage<C> {
         let runtime_storage = self
             .storages

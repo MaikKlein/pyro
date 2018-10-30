@@ -1,6 +1,6 @@
 [package]
 name = "pyro"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["maik <maikklein@googlemail.com>"]
 edition = "2018"
 license = "MIT"
@@ -13,7 +13,6 @@ description = "Entity component system"
 itertools = "0.7"
 rayon = "1"
 downcast-rs = "1.0"
-fnv = "1.0"
 parking_lot = "0.6"
 vec_map = "0.8"
 log = "0.4"
