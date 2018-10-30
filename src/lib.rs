@@ -50,7 +50,7 @@
 //! positions:  [Pos1, Pos2, Pos3, .., PosN], [Pos1, Pos2, Pos3, .., PosM]
 //! velocities: [Vel1, Vel2, Vel3, .., VelN], [Vel1, Vel2, Vel3, .., VelM]
 //!                                         ^
-//!                                         Jump occours here
+//!                                         Jump occurs here
 //! ```
 //! The jump is something like a chain of two iterators. We look at all the storages
 //! that match specific query. If the query would be `Write<Position>`, then we would
