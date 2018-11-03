@@ -318,9 +318,6 @@ where
         Q::Borrow: RegisterBorrow,
     {
         self.borrow_and_validate::<Q::Borrow>();
-        // We need to explicitly tell rust how long we reborrow `self`, or the borrow checker
-        // gets confused.
-        let s: &'s Self = self;
         let iter = self
             .storages
             .iter()
@@ -328,7 +325,7 @@ where
             .filter(|&(_, storage)| Q::is_match(storage))
             .flat_map(move |(id, storage)| {
                 let query = unsafe { Q::query(storage) };
-                let entities = s.entities_storage(id as StorageId);
+                let entities = self.entities_storage(id as StorageId);
                 Iterator::zip(entities, query)
             });
         BorrowIter { world: self, iter }
