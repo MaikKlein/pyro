@@ -11,9 +11,11 @@ A linear Entity Component System
 
 ## Benchmarks
 
-![](https://raw.githubusercontent.com/MaikKlein/ecs_bench/master/graph/all.png)
 [ecs_bench](https://github.com/MaikKlein/ecs_bench)
 
+![](https://raw.githubusercontent.com/MaikKlein/ecs_bench/master/graph/all.png)
+
+[bench defense](https://github.com/MaikKlein/bench_defense)
 
 ![](https://i.imgur.com/AyBFYAp.png)
-[bench defense](https://github.com/MaikKlein/bench_defense)
+
