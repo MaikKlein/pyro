@@ -419,6 +419,26 @@ where
         self.component_map_inv[storage_id as usize].insert(component_id as usize, id);
     }
 
+    /// Retrieves a component for a specific [`Entity`].
+    pub fn get_entity<C: Component>(&self, e: Entity) -> Option<&C> {
+        unsafe {
+            self.storages[e.storage_id as usize]
+                .component::<C>()
+                .get(e.id as usize)
+        }
+    }
+
+    /// Same as [`World::get_entity`] but mutable.
+    // [TODO]: Possibly make this immutable and add the runtime borrow system if &mut isn't
+    // flexible enough.
+    pub fn get_entity_mut<C: Component>(&mut self, e: Entity) -> Option<&mut C> {
+        unsafe {
+            self.storages[e.storage_id as usize]
+                .component_mut::<C>()
+                .get_mut(e.id as usize)
+        }
+    }
+
     /// Removes the specified entities from [`World`]. Those entities are now considered invalid,
     /// which can be checked with [`World::is_entity_valid`].
     pub fn remove_entities<I>(&mut self, entities: I)
@@ -566,9 +586,11 @@ impl RuntimeBorrow {
                         let writes = borrow.writes.intersection(&next_access.writes).cloned();
                         let reads = borrow.writes.intersection(&next_access.reads).cloned();
                         writes.chain(reads)
-                    }).collect();
+                    })
+                    .collect();
                 reads.chain(rest)
-            }).collect();
+            })
+            .collect();
         if overlapping_borrows.is_empty() {
             Ok(())
         } else {
