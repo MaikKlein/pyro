@@ -384,7 +384,6 @@ where
             if let Some(insert_at) = self.free_map[storage_index].pop() {
                 // When we create a new entity that has already been deleted once, we need to
                 // increment the version.
-                self.version[storage_index][insert_at as usize] += Wrapping(1);
                 self.insert_component_map(storage_id, insert_at, component_id);
             } else {
                 // If the free list is empty, then we can insert it at the end.
@@ -422,9 +421,12 @@ where
     /// Retrieves a component for a specific [`Entity`].
     pub fn get_entity<C: Component>(&self, e: Entity) -> Option<&C> {
         unsafe {
-            self.storages[e.storage_id as usize]
-                .component::<C>()
-                .get(e.id as usize)
+            let storage = &self.storages[e.storage_id as usize];
+            if !storage.contains::<C>() || !self.is_entity_valid(e) {
+                return None;
+            }
+            let component_id = self.component_map[e.storage_id as usize][e.id as usize];
+            storage.component::<C>().get(component_id as usize)
         }
     }
 
@@ -433,9 +435,12 @@ where
     // flexible enough.
     pub fn get_entity_mut<C: Component>(&mut self, e: Entity) -> Option<&mut C> {
         unsafe {
-            self.storages[e.storage_id as usize]
-                .component_mut::<C>()
-                .get_mut(e.id as usize)
+            let storage = &self.storages[e.storage_id as usize];
+            if !storage.contains::<C>() || !self.is_entity_valid(e) {
+                return None;
+            }
+            let component_id = self.component_map[e.storage_id as usize][e.id as usize];
+            storage.component_mut::<C>().get_mut(component_id as usize)
         }
     }
 
@@ -449,8 +454,12 @@ where
             debug!("Removing {:?}", entity);
             let storage_id = entity.storage_id as usize;
             let is_valid = self.is_entity_valid(entity);
-            assert!(is_valid, "Found an invalid Entitity");
-            let component_id = self.component_map[storage_id][entity.id as usize];
+            if !is_valid {
+                continue;
+            }
+            let component_id = *self.component_map[storage_id]
+                .get(entity.id as usize)
+                .expect("component id");
             // [FIXME]: This uses dynamic dispatch so we might want to batch entities
             // together to reduce the overhead.
             let swap = self.storages[storage_id].remove(component_id) as ComponentId;
@@ -463,12 +472,12 @@ where
                 self.storages[storage_id].len() + 1,
                 self.component_map[storage_id].len()
             );
-
             // We need to look up the id that got swapped
             let key = self.component_map_inv[storage_id][swap as usize];
             debug!("- Updating {} to {}", key, component_id);
             // The id that was swapped should now point to the component_id that was removed
             self.insert_component_map(storage_id as StorageId, key, component_id);
+
             debug!("- Removing {} from `component_map`", entity.id);
             // Now we consider the id to be deleted and remove it from the `component_map`.
             self.component_map[storage_id as usize].remove(entity.id as usize);
@@ -478,6 +487,7 @@ where
             // And we need to append the remove id to the free map so we can reuse it again when we
             // `append_components`.
             self.free_map[storage_id].push(entity.id);
+            self.version[storage_id][entity.id as usize] += Wrapping(1);
         }
     }
 }
