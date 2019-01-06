@@ -418,8 +418,14 @@ where
         self.component_map_inv[storage_id as usize].insert(component_id as usize, id);
     }
 
+
+    /// Returns true if the entity owns the requested component.
+    pub fn has_component<C: Component>(&self, e: Entity) -> bool {
+        self.get_component::<C>(e).is_some()
+    }
+
     /// Retrieves a component for a specific [`Entity`].
-    pub fn get_entity<C: Component>(&self, e: Entity) -> Option<&C> {
+    pub fn get_component<C: Component>(&self, e: Entity) -> Option<&C> {
         unsafe {
             let storage = &self.storages[e.storage_id as usize];
             if !storage.contains::<C>() || !self.is_entity_valid(e) {
@@ -430,10 +436,10 @@ where
         }
     }
 
-    /// Same as [`World::get_entity`] but mutable.
+    /// Same as [`World::get_component`] but mutable.
     // [TODO]: Possibly make this immutable and add the runtime borrow system if &mut isn't
     // flexible enough.
-    pub fn get_entity_mut<C: Component>(&mut self, e: Entity) -> Option<&mut C> {
+    pub fn get_component_mut<C: Component>(&mut self, e: Entity) -> Option<&mut C> {
         unsafe {
             let storage = &self.storages[e.storage_id as usize];
             if !storage.contains::<C>() || !self.is_entity_valid(e) {
