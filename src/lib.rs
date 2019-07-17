@@ -675,7 +675,7 @@ pub trait Query<'s> {
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
-macro_rules! impl_matcher_all{
+macro_rules! impl_matcher_default {
     ($($ty: ident),*) => {
         impl<$($ty,)*> Matcher for ($($ty,)*)
         where
@@ -689,34 +689,6 @@ macro_rules! impl_matcher_all{
                 )&&*
             }
         }
-    }
-}
-
-impl_matcher_all!(A);
-impl_matcher_all!(A, B);
-impl_matcher_all!(A, B, C);
-impl_matcher_all!(A, B, C, D);
-impl_matcher_all!(A, B, C, D, E);
-impl_matcher_all!(A, B, C, D, E, F);
-impl_matcher_all!(A, B, C, D, E, F, G);
-impl_matcher_all!(A, B, C, D, E, F, G, H);
-// impl_matcher_all!(A, B, C, D, E, F, G, H, I);
-// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J);
-// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J, K);
-
-impl<'s, A> Query<'s> for A
-where
-    A: Fetch<'s>,
-{
-    type Borrow = A;
-    type Iter = A::Iter;
-    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
-        A::fetch(storage)
-    }
-}
-
-macro_rules! impl_query_all{
-    ($($ty: ident),*) => {
         impl<'s, $($ty,)*> Query<'s> for ($($ty,)*)
         where
             $(
@@ -732,17 +704,37 @@ macro_rules! impl_query_all{
     }
 }
 
-impl_query_all!(A);
-impl_query_all!(A, B);
-impl_query_all!(A, B, C);
-impl_query_all!(A, B, C, D);
-impl_query_all!(A, B, C, D, E);
-impl_query_all!(A, B, C, D, E, F);
-impl_query_all!(A, B, C, D, E, F, G);
-impl_query_all!(A, B, C, D, E, F, G, H);
-// impl_query_all!(A, B, C, D, E, F, G, H, I);
-// impl_query_all!(A, B, C, D, E, F, G, H, I, J);
-// impl_query_all!(A, B, C, D, E, F, G, H, I, J, K);
+impl_matcher_default!(A);
+impl_matcher_default!(A, B);
+impl_matcher_default!(A, B, C);
+impl_matcher_default!(A, B, C, D);
+impl_matcher_default!(A, B, C, D, E);
+impl_matcher_default!(A, B, C, D, E, F);
+impl_matcher_default!(A, B, C, D, E, F, G);
+impl_matcher_default!(A, B, C, D, E, F, G, H);
+// impl_matcher_all!(A, B, C, D, E, F, G, H, I);
+// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J);
+// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J, K);
+
+impl<'s, A> Query<'s> for A
+where
+    A: Fetch<'s>,
+{
+    type Borrow = A;
+    type Iter = A::Iter;
+    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
+        A::fetch(storage)
+    }
+}
+
+impl<A> Matcher for A
+where
+    A: for<'s> Fetch<'s>,
+{
+    fn is_match<S: Storage>(storage: &S) -> bool {
+        storage.contains::<A::Component>()
+    }
+}
 
 pub struct EmptyStorage<S> {
     storage: S,
