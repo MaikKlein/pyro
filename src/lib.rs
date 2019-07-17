@@ -356,7 +356,7 @@ where
         } else {
             // if we did not find a storage, we need to create one
             let id = self.storages.len() as StorageId;
-            let mut storage = <A as BuildStorage>::build::<S>(id).access();
+            let mut storage = <A as BuildStorage>::build::<S>(id).build();
             let len = A::append_components(i, &mut storage);
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
@@ -736,14 +736,28 @@ where
     }
 }
 
-pub struct EmptyStorage<S> {
+/// Acts as a builder for a new [`Storage`]. [`Component`]s can be registered, and then the `Storage`
+/// can be build with [`Archetype::build`].
+pub struct Archetype<S> {
     storage: S,
+}
+
+impl<S> Archetype<S>
+where
+    S: Storage + RegisterComponent,
+{
+    pub fn register_component<C: Component>(&mut self) {
+        self.storage.register_component::<C>();
+    }
+    pub fn build(self) -> S {
+        self.storage
+    }
 }
 
 /// [`BuildStorage`] is used to create different [`Storage`]s at runtime. See also
 /// [`AppendComponents`] and [`World::append_components`]
 pub trait BuildStorage {
-    fn build<S: Storage + RegisterComponent>(id: StorageId) -> EmptyStorage<S>;
+    fn build<S: Storage + RegisterComponent>(id: StorageId) -> Archetype<S>;
 }
 
 macro_rules! impl_build_storage {
@@ -754,7 +768,7 @@ macro_rules! impl_build_storage {
                 $ty:Component,
             )*
         {
-            fn build<S: Storage + RegisterComponent>(id: StorageId) -> EmptyStorage<S> {
+            fn build<S: Storage + RegisterComponent>(id: StorageId) -> Archetype<S> {
                 let mut empty = S::empty(id);
                 $(
                     empty.register_component::<$ty>();
@@ -776,17 +790,6 @@ impl_build_storage!(A, B, C, D, E, F, G, H);
 // impl_build_storage!(A, B, C, D, E, F, G, H, I, J);
 // impl_build_storage!(A, B, C, D, E, F, G, H, I, J, k);
 
-impl<S> EmptyStorage<S>
-where
-    S: Storage + RegisterComponent,
-{
-    pub fn register_component<C: Component>(&mut self) {
-        self.storage.register_component::<C>();
-    }
-    pub fn access(self) -> S {
-        self.storage
-    }
-}
 
 pub trait RuntimeStorage: Downcast {
     fn remove(&mut self, id: ComponentId);
@@ -993,7 +996,7 @@ pub struct SoaStorage {
 }
 
 /// A [`Storage`] won't have any arrays or vectors when it is created. [`RegisterComponent`] can
-/// register or add those component arrays. See also [`EmptyStorage::register_component`]
+/// register or add those component arrays. See also [`Archetype::register_component`]
 pub trait RegisterComponent {
     fn register_component<C: Component>(&mut self);
 }
@@ -1014,9 +1017,9 @@ pub trait Storage: Sized {
     fn len(&self) -> usize;
     fn len_mut(&mut self) -> &mut usize;
     fn id(&self) -> StorageId;
-    /// Creates an [`EmptyStorage`]. This storage will not have any registered components when it
+    /// Creates an [`Archetype`]. This storage will not have any registered components when it
     /// is created. See [`RegisterComponent`].
-    fn empty(id: StorageId) -> EmptyStorage<Self>;
+    fn empty(id: StorageId) -> Archetype<Self>;
     /// Retrieves the component array and panics if `C` is not inside this storage.
     unsafe fn component<C: Component>(&self) -> &[C];
     /// Same as [`Storage::component`] but mutable.
@@ -1084,14 +1087,14 @@ impl Storage for SoaStorage {
             self.get_storage::<C>().inner_mut().push(component);
         }
     }
-    fn empty(id: StorageId) -> EmptyStorage<Self> {
+    fn empty(id: StorageId) -> Archetype<Self> {
         let storage = SoaStorage {
             types: HashSet::new(),
             storages: HashMap::new(),
             id,
             len: 0,
         };
-        EmptyStorage { storage }
+        Archetype { storage }
     }
     unsafe fn component_mut<C: Component>(&self) -> &mut [C] {
         self.get_storage::<C>().inner_mut().as_mut_slice()
