@@ -11,7 +11,7 @@
 //! type PosVelQuery = (Write<Pos>, Read<Vel>);
 //! //                  ^^^^^       ^^^^
 //! //                  Mutable     Immutable
-//! world.matcher::<All<PosVelQuery>>().for_each(|(pos, vel)|{
+//! world.matcher::<PosVelQuery>().for_each(|(pos, vel)|{
 //!     pos += vel;
 //! })
 //! ```
@@ -67,7 +67,7 @@
 //!
 //! ```
 //! extern crate pyro;
-//! use pyro::{ World, Entity, Read, Write, All, SoaStorage };
+//! use pyro::{ World, Entity, Read, Write, SoaStorage };
 //! struct Position;
 //! struct Velocity;
 //!
@@ -90,21 +90,21 @@
 //! type PosVelQuery = (Write<Position>, Read<Velocity>);
 //!
 //! // Retrieves all entities that have a Position and Velocity component as an iterator.
-//! world.matcher::<All<PosVelQuery>>().for_each(|(pos, vel)|{
+//! world.matcher::<PosVelQuery>().for_each(|(pos, vel)|{
 //!    // ...
 //! });
 //!
 //! // The same query as above but also retrieves the entities and collects the entities into a
 //! // `Vec<Entity>`.
 //! let entities: Vec<Entity> =
-//!     world.matcher_with_entities::<All<PosVelQuery>>()
+//!     world.matcher_with_entities::<PosVelQuery>()
 //!     .filter_map(|(entity, (pos, vel))|{
 //!         Some(entity)
 //!     }).collect();
 //!
 //! // Removes all the entities
 //! world.remove_entities(entities);
-//! let count = world.matcher::<All<PosVelQuery>>().count();
+//! let count = world.matcher::<PosVelQuery>().count();
 //! assert_eq!(count, 0);
 //! ```
 extern crate downcast_rs;
@@ -273,7 +273,7 @@ where
     /// ```rust,ignore
     /// fn update(world: &mut World) {
     ///    world
-    ///        .matcher::<All<(Write<Position>, Read<Velocity>)>>()
+    ///        .matcher::<(Write<Position>, Read<Velocity>)>()
     ///        .for_each(|(p, v)| {
     ///            p.x += v.dx;
     ///            p.y += v.dy;
@@ -303,7 +303,7 @@ where
     /// ```rust,ignore
     /// fn update(world: &mut World) {
     ///    world
-    ///        .matcher_with_entities::<All<(Write<Position>, Read<Velocity>)>>()
+    ///        .matcher_with_entities::<(Write<Position>, Read<Velocity>)>()
     ///        .for_each(|(entity, (p, v))| {
     ///            p.x += v.dx;
     ///            p.y += v.dy;
@@ -664,11 +664,11 @@ impl<'s, C: Component> Fetch<'s> for Write<C> {
     }
 }
 
-/// Allows to match over different [`Storage`]s. See also [`All`].
+/// Allows to match over different [`Storage`]s.
 pub trait Matcher {
     fn is_match<S: Storage>(storage: &S) -> bool;
 }
-/// Allows to query multiple components from a [`Storage`]. See also [`All`].
+/// Allows to query multiple components from a [`Storage`].
 pub trait Query<'s> {
     type Borrow;
     type Iter: ExactSizeIterator + 's;
