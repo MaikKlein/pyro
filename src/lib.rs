@@ -418,7 +418,6 @@ where
         self.component_map_inv[storage_id as usize].insert(component_id as usize, id);
     }
 
-
     /// Returns true if the entity owns the requested component.
     pub fn has_component<C: Component>(&self, e: Entity) -> bool {
         self.get_component::<C>(e).is_some()
@@ -676,18 +675,12 @@ pub trait Query<'s> {
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
-/// Is satisfied when a storages contains all of the specified components.
-/// ```rust,ignore
-/// type Query = All<(Write<Position>, Read<Velocity>)>;
-/// ```
-pub struct All<'s, Tuple>(pub PhantomData<&'s Tuple>);
-
 macro_rules! impl_matcher_all{
     ($($ty: ident),*) => {
-        impl<'s, $($ty,)*> Matcher for All<'s, ($($ty,)*)>
+        impl<$($ty,)*> Matcher for ($($ty,)*)
         where
             $(
-                $ty: Fetch<'s>,
+                $ty: for<'s> Fetch<'s>,
             )*
         {
             fn is_match<S: Storage>(storage: &S) -> bool {
@@ -711,7 +704,7 @@ impl_matcher_all!(A, B, C, D, E, F, G, H);
 // impl_matcher_all!(A, B, C, D, E, F, G, H, I, J);
 // impl_matcher_all!(A, B, C, D, E, F, G, H, I, J, K);
 
-impl<'s, A> Query<'s> for All<'s, A>
+impl<'s, A> Query<'s> for A
 where
     A: Fetch<'s>,
 {
@@ -724,7 +717,7 @@ where
 
 macro_rules! impl_query_all{
     ($($ty: ident),*) => {
-        impl<'s, $($ty,)*> Query<'s> for All<'s, ($($ty,)*)>
+        impl<'s, $($ty,)*> Query<'s> for ($($ty,)*)
         where
             $(
                 $ty: Fetch<'s>,
