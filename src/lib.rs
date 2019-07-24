@@ -108,24 +108,28 @@
 //! assert_eq!(count, 0);
 //! ```
 extern crate downcast_rs;
-extern crate itertools;
 extern crate log;
 extern crate parking_lot;
 extern crate rayon;
 extern crate typedef;
 extern crate vec_map;
+
+mod zip;
 use downcast_rs::{impl_downcast, Downcast};
-use itertools::{multizip, Zip};
 use log::debug;
 use parking_lot::Mutex;
+use rayon::iter::plumbing::UnindexedConsumer;
+pub use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::iter::FusedIterator;
+use std::iter::{ExactSizeIterator, IntoIterator};
 use std::marker::PhantomData;
 use std::num::Wrapping;
 use typedef::TypeDef;
 use vec_map::VecMap;
+use zip::ZipSlice;
 
 pub type StorageId = u16;
 pub type ComponentId = u32;
@@ -137,6 +141,19 @@ pub struct BorrowIter<'s, S, I> {
     iter: I,
 }
 
+impl<'s, S, I> ParallelIterator for BorrowIter<'s, S, Option<I>>
+where
+    I: ParallelIterator,
+    S: Send + Sync,
+{
+    type Item = I::Item;
+    fn drive_unindexed<C>(mut self, consumer: C) -> C::Result
+    where
+        C: UnindexedConsumer<Self::Item>,
+    {
+        self.iter.take().unwrap().drive_unindexed(consumer)
+    }
+}
 impl<'s, S, I> Iterator for BorrowIter<'s, S, I>
 where
     I: Iterator,
@@ -224,7 +241,7 @@ impl<S> World<S> {
 
 impl<S> World<S>
 where
-    S: Storage,
+    S: Storage + Send + Sync,
 {
     /// Creates an `Iterator` over every [`Entity`] inside [`World`]. The entities are
     /// not ordered.
@@ -268,6 +285,25 @@ where
             });
         }
     }
+    pub fn par_matcher<'s, Q>(
+        &'s self,
+    ) -> impl ParallelIterator<Item = <<Q as ParQuery<'s>>::Iter as ParallelIterator>::Item> + 's
+    where
+        Q: ParQuery<'s> + Matcher,
+        Q::Borrow: RegisterBorrow,
+    {
+        let iter = unsafe {
+            self.storages
+                .par_iter()
+                .filter(|&storage| Q::is_match(storage))
+                .map(|storage| Q::query(storage))
+                .flat_map(|iter| iter)
+        };
+        BorrowIter {
+            world: self,
+            iter: Some(iter),
+        }
+    }
     /// Uses [`Query`] and [`Matcher`] to access the correct components. [`Read`] will borrow the
     /// component immutable while [`Write`] will borrow the component mutable.
     /// ```rust,ignore
@@ -295,8 +331,6 @@ where
                 .map(|storage| Q::query(storage))
                 .flat_map(|iter| iter)
         };
-        // [FIXME]: BorrowIter is more than 2x slower, than just returning `iter` here for the
-        // `ecs_bench`. Maybe the benchmark is too simple?
         BorrowIter { world: self, iter }
     }
     /// Same as [`World::matcher`] but also returns the corresponding [`Entity`].
@@ -644,23 +678,23 @@ pub struct Write<C>(PhantomData<C>);
 /// mutable or immutable.
 pub trait Fetch<'s> {
     type Component: Component;
-    type Iter: ExactSizeIterator + 's;
+    type Iter: Index<'s>;
     unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
 impl<'s, C: Component> Fetch<'s> for Read<C> {
     type Component = C;
-    type Iter = std::slice::Iter<'s, C>;
+    type Iter = Slice<'s, C>;
     unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
-        storage.component::<C>().iter()
+        Slice::from_slice(storage.component_mut::<C>())
     }
 }
 
 impl<'s, C: Component> Fetch<'s> for Write<C> {
     type Component = C;
-    type Iter = std::slice::IterMut<'s, C>;
+    type Iter = SliceMut<'s, C>;
     unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
-        storage.component_mut::<C>().iter_mut()
+        SliceMut::from_slice(storage.component_mut::<C>())
     }
 }
 
@@ -671,8 +705,120 @@ pub trait Matcher {
 /// Allows to query multiple components from a [`Storage`].
 pub trait Query<'s> {
     type Borrow;
-    type Iter: ExactSizeIterator + 's;
+    type Iter: Iterator + 's;
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
+}
+/// Allows to query multiple components from a [`Storage`] in parallel.
+pub trait ParQuery<'s> {
+    type Borrow;
+    type Iter: ParallelIterator + 's;
+    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
+}
+
+pub struct Slice<'a, T> {
+    start: *const T,
+    len: usize,
+    _marker: PhantomData<&'a ()>,
+}
+unsafe impl<T: Send> Send for Slice<'_, T> {}
+unsafe impl<T: Sync> Sync for Slice<'_, T> {}
+
+impl<'a, T> Slice<'a, T> {
+    pub fn split_at(&self, idx: usize) -> (Self, Self) {
+        unsafe {
+            let left = Slice::new(self.start, idx);
+            let right = Slice::new(self.start.offset(idx as _), self.len - idx);
+            (left, right)
+        }
+    }
+    pub fn new(start: *const T, len: usize) -> Self {
+        Self {
+            start,
+            len,
+            _marker: PhantomData,
+        }
+    }
+    pub fn from_slice(slice: &'a [T]) -> Self {
+        Slice {
+            start: slice.as_ptr(),
+            len: slice.len(),
+            _marker: PhantomData,
+        }
+    }
+}
+pub struct SliceMut<'a, T> {
+    start: *mut T,
+    len: usize,
+    _marker: PhantomData<&'a ()>,
+}
+unsafe impl<T: Send> Send for SliceMut<'_, T> {}
+unsafe impl<T: Sync> Sync for SliceMut<'_, T> {}
+
+impl<'a, T> SliceMut<'a, T> {
+    pub fn from_slice(slice: &'a mut [T]) -> Self {
+        SliceMut {
+            start: slice.as_mut_ptr(),
+            len: slice.len(),
+            _marker: PhantomData,
+        }
+    }
+    pub fn new(start: *mut T, len: usize) -> Self {
+        Self {
+            start,
+            len,
+            _marker: PhantomData,
+        }
+    }
+}
+
+pub trait Index<'a>: Sized {
+    type Item;
+    unsafe fn get_unchecked(&self, idx: usize) -> Self::Item;
+    fn split_at(self, idx: usize) -> (Self, Self);
+    fn len(&self) -> usize;
+}
+
+impl<'a, T> Index<'a> for Slice<'a, T>
+where
+    T: 'a,
+{
+    type Item = &'a T;
+    #[inline]
+    unsafe fn get_unchecked(&self, idx: usize) -> Self::Item {
+        &*self.start.offset(idx as _)
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn split_at(self, idx: usize) -> (Self, Self) {
+        unsafe {
+            let left = Slice::new(self.start, idx);
+            let right = Slice::new(self.start.offset(idx as _), self.len - idx);
+            (left, right)
+        }
+    }
+}
+impl<'a, T> Index<'a> for SliceMut<'a, T>
+where
+    T: 'a,
+{
+    type Item = &'a mut T;
+    #[inline]
+    unsafe fn get_unchecked(&self, idx: usize) -> Self::Item {
+        &mut *self.start.offset(idx as _)
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn split_at(self, idx: usize) -> (Self, Self) {
+        unsafe {
+            let left = SliceMut::new(self.start, idx);
+            let right = SliceMut::new(self.start.offset(idx as _), self.len - idx);
+            (left, right)
+        }
+    }
 }
 
 macro_rules! impl_matcher_default {
@@ -692,13 +838,27 @@ macro_rules! impl_matcher_default {
         impl<'s, $($ty,)*> Query<'s> for ($($ty,)*)
         where
             $(
-                $ty: Fetch<'s>,
+                $ty: Fetch<'s> + 's,
             )*
         {
             type Borrow = ($($ty,)*);
-            type Iter = Zip<($($ty::Iter,)*)>;
+            type Iter = ZipSlice<'s, ($($ty::Iter,)*)>;
             unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
-                multizip(($($ty::fetch(storage),)*))
+                ZipSlice::new(($($ty::fetch(storage),)*))
+            }
+        }
+        impl<'s, $($ty,)*> ParQuery<'s> for ($($ty,)*)
+        where
+            $(
+                $ty: Fetch<'s> + Send + Sync + 's,
+                <$ty as Fetch<'s>>::Iter: Send + Sync,
+                <<$ty as Fetch<'s>>::Iter as Index<'s>>::Item: Send + Sync,
+            )*
+        {
+            type Borrow = ($($ty,)*);
+            type Iter = ZipSlice<'s, ($($ty::Iter,)*)>;
+            unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
+                ZipSlice::new(($($ty::fetch(storage),)*))
             }
         }
     }
@@ -712,20 +872,19 @@ impl_matcher_default!(A, B, C, D, E);
 impl_matcher_default!(A, B, C, D, E, F);
 impl_matcher_default!(A, B, C, D, E, F, G);
 impl_matcher_default!(A, B, C, D, E, F, G, H);
-// impl_matcher_all!(A, B, C, D, E, F, G, H, I);
-// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J);
-// impl_matcher_all!(A, B, C, D, E, F, G, H, I, J, K);
+impl_matcher_default!(A, B, C, D, E, F, G, H, I);
 
-impl<'s, A> Query<'s> for A
-where
-    A: Fetch<'s>,
-{
-    type Borrow = A;
-    type Iter = A::Iter;
-    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
-        A::fetch(storage)
-    }
-}
+//impl<'s, A> Query<'s> for A
+//where
+//    A: Fetch<'s>,
+//{
+//    type Borrow = A;
+//    type Iter = A::Iter;
+//    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
+//        unimplemented!()
+//        //A::fetch(storage)
+//    }
+//}
 
 impl<A> Matcher for A
 where
@@ -786,10 +945,10 @@ impl_build_storage!(A, B, C, D, E);
 impl_build_storage!(A, B, C, D, E, F);
 impl_build_storage!(A, B, C, D, E, F, G);
 impl_build_storage!(A, B, C, D, E, F, G, H);
+impl_build_storage!(A, B, C, D, E, F, G, H, I);
 // impl_build_storage!(A, B, C, D, E, F, G, H, I);
 // impl_build_storage!(A, B, C, D, E, F, G, H, I, J);
 // impl_build_storage!(A, B, C, D, E, F, G, H, I, J, k);
-
 
 pub trait RuntimeStorage: Downcast {
     fn remove(&mut self, id: ComponentId);
@@ -994,6 +1153,8 @@ pub struct SoaStorage {
     types: HashSet<TypeId>,
     storages: HashMap<TypeId, Box<RuntimeStorage>>,
 }
+unsafe impl Send for SoaStorage {}
+unsafe impl Sync for SoaStorage {}
 
 /// A [`Storage`] won't have any arrays or vectors when it is created. [`RegisterComponent`] can
 /// register or add those component arrays. See also [`Archetype::register_component`]
