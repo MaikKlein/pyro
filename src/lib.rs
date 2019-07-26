@@ -969,19 +969,18 @@ impl RuntimeStorage {
 impl<T: Component> RuntimeStorage for UnsafeStorage<T> {
     fn remove(&mut self, id: ComponentId) {
         unsafe {
-            self.inner_mut().swap_remove(id as usize);
+            (*self.inner_mut()).swap_remove(id as usize);
         }
     }
 }
 
-// FIXME: *Unsafe* Fix multiple mutable borrows. Should be fixed in the `Query` API.
 pub struct UnsafeStorage<T>(UnsafeCell<Vec<T>>);
 impl<T> UnsafeStorage<T> {
     pub fn new() -> Self {
         UnsafeStorage(UnsafeCell::new(Vec::<T>::new()))
     }
-    pub unsafe fn inner_mut(&self) -> &mut Vec<T> {
-        &mut (*self.0.get())
+    pub unsafe fn inner_mut(&self) -> *mut Vec<T> {
+        self.0.get()
     }
 }
 
@@ -1240,12 +1239,12 @@ impl Storage for SoaStorage {
         I: IntoIterator<Item = C>,
     {
         unsafe {
-            self.get_storage_mut::<C>().inner_mut().extend(components);
+            (*self.get_storage_mut::<C>().inner_mut()).extend(components);
         }
     }
     fn push_component<C: Component>(&mut self, component: C) {
         unsafe {
-            self.get_storage::<C>().inner_mut().push(component);
+            (*self.get_storage::<C>().inner_mut()).push(component);
         }
     }
     fn empty(id: StorageId) -> Archetype<Self> {
@@ -1258,10 +1257,10 @@ impl Storage for SoaStorage {
         Archetype { storage }
     }
     unsafe fn component_mut<C: Component>(&self) -> &mut [C] {
-        self.get_storage::<C>().inner_mut().as_mut_slice()
+        (*self.get_storage::<C>().inner_mut()).as_mut_slice()
     }
     unsafe fn component<C: Component>(&self) -> &[C] {
-        self.get_storage::<C>().inner_mut().as_slice()
+        (*self.get_storage::<C>().inner_mut()).as_slice()
     }
 
     fn contains<C: Component>(&self) -> bool {
