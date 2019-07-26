@@ -751,6 +751,7 @@ pub struct SliceMut<'a, T> {
     len: usize,
     _marker: PhantomData<&'a ()>,
 }
+
 unsafe impl<T: Send> Send for SliceMut<'_, T> {}
 unsafe impl<T: Sync> Sync for SliceMut<'_, T> {}
 
@@ -1183,6 +1184,7 @@ pub trait Storage: Sized {
     /// Retrieves the component array and panics if `C` is not inside this storage.
     unsafe fn component<C: Component>(&self) -> &[C];
     /// Same as [`Storage::component`] but mutable.
+    #[allow(clippy::mut_from_ref)]
     unsafe fn component_mut<C: Component>(&self) -> &mut [C];
     /// Appends components to one array. See [`AppendComponents`] that uses this method.
     fn push_components<C, I>(&mut self, components: I)

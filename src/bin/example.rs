@@ -24,8 +24,7 @@ fn main() {
     type PosVelQuery = (Write<Position>, Read<Velocity>);
 
     // Retrieves all entities that have a Position and Velocity component as an iterator.
-    world.par_matcher::<PosVelQuery>().map(|(pos, _vel)| {
-        println!("{:?}", pos)
+    world.par_matcher::<PosVelQuery>().for_each(|(_pos, _vel)| {
         // ...
     });
 
@@ -33,7 +32,7 @@ fn main() {
     // `Vec<Entity>`.
     let entities: Vec<Entity> = world
         .matcher_with_entities::<PosVelQuery>()
-        .filter_map(|(entity, (_pos, _vel))| Some(entity))
+        .map(|(entity, _)| entity)
         .collect();
 
     // Removes all the entities
