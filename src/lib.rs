@@ -114,12 +114,15 @@ extern crate rayon;
 extern crate typedef;
 extern crate vec_map;
 
+mod chunk;
+mod slice;
 mod zip;
 use downcast_rs::{impl_downcast, Downcast};
 use log::debug;
 use parking_lot::Mutex;
 use rayon::iter::plumbing::UnindexedConsumer;
 pub use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use slice::{Slice, SliceMut};
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
@@ -134,6 +137,13 @@ use zip::ZipSlice;
 pub type StorageId = u16;
 pub type ComponentId = u32;
 pub type Version = u16;
+
+pub trait Index<'a>: Sized {
+    type Item;
+    unsafe fn get_unchecked(&self, idx: usize) -> Self::Item;
+    fn split_at(self, idx: usize) -> (Self, Self);
+    fn len(&self) -> usize;
+}
 
 /// The [`Iterator`] is used to end a borrow from a query like [`World::matcher`].
 pub struct BorrowIter<'s, S, I> {
@@ -715,70 +725,6 @@ pub trait ParQuery<'s> {
     unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
 }
 
-pub struct Slice<'a, T> {
-    start: *const T,
-    len: usize,
-    _marker: PhantomData<&'a ()>,
-}
-unsafe impl<T: Send> Send for Slice<'_, T> {}
-unsafe impl<T: Sync> Sync for Slice<'_, T> {}
-
-impl<'a, T> Slice<'a, T> {
-    pub fn split_at(&self, idx: usize) -> (Self, Self) {
-        unsafe {
-            let left = Slice::new(self.start, idx);
-            let right = Slice::new(self.start.offset(idx as _), self.len - idx);
-            (left, right)
-        }
-    }
-    pub fn new(start: *const T, len: usize) -> Self {
-        Self {
-            start,
-            len,
-            _marker: PhantomData,
-        }
-    }
-    pub fn from_slice(slice: &'a [T]) -> Self {
-        Slice {
-            start: slice.as_ptr(),
-            len: slice.len(),
-            _marker: PhantomData,
-        }
-    }
-}
-pub struct SliceMut<'a, T> {
-    start: *mut T,
-    len: usize,
-    _marker: PhantomData<&'a ()>,
-}
-
-unsafe impl<T: Send> Send for SliceMut<'_, T> {}
-unsafe impl<T: Sync> Sync for SliceMut<'_, T> {}
-
-impl<'a, T> SliceMut<'a, T> {
-    pub fn from_slice(slice: &'a mut [T]) -> Self {
-        SliceMut {
-            start: slice.as_mut_ptr(),
-            len: slice.len(),
-            _marker: PhantomData,
-        }
-    }
-    pub fn new(start: *mut T, len: usize) -> Self {
-        Self {
-            start,
-            len,
-            _marker: PhantomData,
-        }
-    }
-}
-
-pub trait Index<'a>: Sized {
-    type Item;
-    unsafe fn get_unchecked(&self, idx: usize) -> Self::Item;
-    fn split_at(self, idx: usize) -> (Self, Self);
-    fn len(&self) -> usize;
-}
-
 impl<'a, T> Index<'a> for Slice<'a, T>
 where
     T: 'a,
@@ -793,11 +739,7 @@ where
         self.len
     }
     fn split_at(self, idx: usize) -> (Self, Self) {
-        unsafe {
-            let left = Slice::new(self.start, idx);
-            let right = Slice::new(self.start.offset(idx as _), self.len - idx);
-            (left, right)
-        }
+        Slice::split_at(self, idx)
     }
 }
 impl<'a, T> Index<'a> for SliceMut<'a, T>
@@ -814,11 +756,7 @@ where
         self.len
     }
     fn split_at(self, idx: usize) -> (Self, Self) {
-        unsafe {
-            let left = SliceMut::new(self.start, idx);
-            let right = SliceMut::new(self.start.offset(idx as _), self.len - idx);
-            (left, right)
-        }
+        SliceMut::split_at_mut(self, idx)
     }
 }
 
