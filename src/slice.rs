@@ -4,12 +4,14 @@ pub enum Mutable {}
 #[derive(Copy, Clone)]
 pub enum Immutable {}
 
-pub trait Mutability: Sealed {}
-trait Sealed {}
+mod sealed {
+    pub trait Sealed {}
+}
+pub trait Mutability: sealed::Sealed {}
+impl sealed::Sealed for Mutable {}
+impl sealed::Sealed for Immutable {}
 impl Mutability for Mutable {}
 impl Mutability for Immutable {}
-impl Sealed for Mutable {}
-impl Sealed for Immutable {}
 
 pub struct RawSlice<'a, M: Mutability, T> {
     pub start: *mut T,
