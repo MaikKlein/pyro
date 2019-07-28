@@ -1,7 +1,9 @@
+//! Temporary helper module until raw slices `*mut [T]` are on stable, or until `&[T]` is not UB
+//! anymore for unitialized memory.
 use std::marker::PhantomData;
-#[derive(Copy, Clone)]
+use std::ops::{Index, IndexMut};
+
 pub enum Mutable {}
-#[derive(Copy, Clone)]
 pub enum Immutable {}
 
 mod sealed {
@@ -10,6 +12,7 @@ mod sealed {
 pub trait Mutability: sealed::Sealed {}
 impl sealed::Sealed for Mutable {}
 impl sealed::Sealed for Immutable {}
+
 impl Mutability for Mutable {}
 impl Mutability for Immutable {}
 
@@ -18,6 +21,7 @@ pub struct RawSlice<'a, M: Mutability, T> {
     pub len: usize,
     _marker: PhantomData<&'a M>,
 }
+
 unsafe impl<M: Mutability, T: Send> Send for RawSlice<'_, M, T> {}
 unsafe impl<M: Mutability, T: Sync> Sync for RawSlice<'_, M, T> {}
 
@@ -29,12 +33,21 @@ where
     M: Mutability,
 {
     #[inline]
-    pub fn get(&self, idx: usize) -> Option<&T> {
+    pub unsafe fn get_unchecked(&self, idx: usize) -> *const T {
+        unsafe { &*self.start.offset(idx as _) as *const T }
+    }
+    #[inline]
+    pub fn get(&self, idx: usize) -> *const T {
+        assert!(idx < self.len);
+        unsafe { self.get_unchecked(idx) }
+    }
+    #[inline]
+    pub fn try_get(&self, idx: usize) -> Option<*const T> {
         let len = self.len;
         if idx >= len {
             return None;
         }
-        unsafe { Some(&*self.start.offset(len as _)) }
+        Some(unsafe { self.get_unchecked(idx) })
     }
 }
 
@@ -60,12 +73,21 @@ impl<'a, T> RawSlice<'a, Immutable, T> {
 
 impl<'a, T> RawSlice<'a, Mutable, T> {
     #[inline]
-    pub fn get_mut(&mut self, idx: usize) -> Option<&mut T> {
+    pub unsafe fn get_unchecked_mut(&self, idx: usize) -> *mut T {
+        unsafe { self.start.offset(idx as _) }
+    }
+    #[inline]
+    pub fn get_mut(&self, idx: usize) -> *mut T {
+        assert!(idx < self.len);
+        unsafe { self.get_unchecked_mut(idx) }
+    }
+    #[inline]
+    pub fn try_get_mut(&mut self, idx: usize) -> Option<*mut T> {
         let len = self.len;
         if idx >= len {
             return None;
         }
-        unsafe { Some(&mut *self.start.offset(len as _)) }
+        Some(unsafe { self.get_unchecked_mut(idx) })
     }
     pub fn from_slice(slice: &'a mut [T]) -> Self {
         Self::from_raw(slice.as_mut_ptr(), slice.len())
