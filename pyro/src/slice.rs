@@ -1,7 +1,6 @@
 //! Temporary helper module until raw slices `*mut [T]` are on stable, or until `&[T]` is not UB
 //! anymore for unitialized memory.
 use std::marker::PhantomData;
-use std::ops::{Index, IndexMut};
 
 pub enum Mutable {}
 pub enum Immutable {}
@@ -34,7 +33,7 @@ where
 {
     #[inline]
     pub unsafe fn get_unchecked(&self, idx: usize) -> *const T {
-        unsafe { &*self.start.offset(idx as _) as *const T }
+        &*self.start.offset(idx as _) as *const T
     }
     #[inline]
     pub fn get(&self, idx: usize) -> *const T {
@@ -74,7 +73,7 @@ impl<'a, T> RawSlice<'a, Immutable, T> {
 impl<'a, T> RawSlice<'a, Mutable, T> {
     #[inline]
     pub unsafe fn get_unchecked_mut(&self, idx: usize) -> *mut T {
-        unsafe { self.start.offset(idx as _) }
+        self.start.offset(idx as _)
     }
     #[inline]
     pub fn get_mut(&self, idx: usize) -> *mut T {

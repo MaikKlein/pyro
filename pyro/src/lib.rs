@@ -114,7 +114,6 @@ extern crate rayon;
 extern crate typedef;
 extern crate vec_map;
 
-mod chunk;
 mod slice;
 mod zip;
 use downcast_rs::{impl_downcast, Downcast};
