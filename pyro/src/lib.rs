@@ -567,6 +567,18 @@ impl<T: Component> PushBorrow for Read<T> {
     }
 }
 
+
+macro_rules! expand {
+    ($m: ident, $ty: ident) => {
+        $m!{$ty}
+    };
+    ($m: ident, $ty: ident, $($tt: ident),*) => {
+        $m!{$ty, $($tt),*}
+        expand!{$m, $($tt),*}
+    };
+}
+
+
 macro_rules! impl_register_borrow{
     ($($ty: ident),*) => {
         impl<$($ty,)*> RegisterBorrow for ($($ty,)*)
@@ -589,14 +601,7 @@ macro_rules! impl_register_borrow{
     }
 }
 
-impl_register_borrow!(A);
-impl_register_borrow!(A, B);
-impl_register_borrow!(A, B, C);
-impl_register_borrow!(A, B, C, D);
-impl_register_borrow!(A, B, C, D, E);
-impl_register_borrow!(A, B, C, D, E, F);
-impl_register_borrow!(A, B, C, D, E, F, G);
-impl_register_borrow!(A, B, C, D, E, F, G, H);
+expand!(impl_register_borrow, A, B, C, D, E, F, G, H);
 
 /// Rust's borrowing rules are not flexible enough for an *ECS*. Often it would preferred to nest multiple
 /// queries like [`World::matcher`], but this is not possible if both borrows would be mutable.
@@ -802,15 +807,7 @@ macro_rules! impl_matcher_default {
     }
 }
 
-impl_matcher_default!(A);
-impl_matcher_default!(A, B);
-impl_matcher_default!(A, B, C);
-impl_matcher_default!(A, B, C, D);
-impl_matcher_default!(A, B, C, D, E);
-impl_matcher_default!(A, B, C, D, E, F);
-impl_matcher_default!(A, B, C, D, E, F, G);
-impl_matcher_default!(A, B, C, D, E, F, G, H);
-impl_matcher_default!(A, B, C, D, E, F, G, H, I);
+expand!(impl_matcher_default, A, B, C, D, E, F, G, H, I);
 
 //impl<'s, A> Query<'s> for A
 //where
@@ -875,25 +872,15 @@ macro_rules! impl_build_storage {
         }
     }
 }
-impl_build_storage!(A);
-impl_build_storage!(A, B);
-impl_build_storage!(A, B, C);
-impl_build_storage!(A, B, C, D);
-impl_build_storage!(A, B, C, D, E);
-impl_build_storage!(A, B, C, D, E, F);
-impl_build_storage!(A, B, C, D, E, F, G);
-impl_build_storage!(A, B, C, D, E, F, G, H);
-impl_build_storage!(A, B, C, D, E, F, G, H, I);
-// impl_build_storage!(A, B, C, D, E, F, G, H, I);
-// impl_build_storage!(A, B, C, D, E, F, G, H, I, J);
-// impl_build_storage!(A, B, C, D, E, F, G, H, I, J, k);
+
+expand!(impl_build_storage, A, B, C, D, E, F, G, H, I);
 
 pub trait RuntimeStorage: Downcast {
     fn remove(&mut self, id: ComponentId);
 }
 
 impl_downcast!(RuntimeStorage);
-impl RuntimeStorage {
+impl dyn RuntimeStorage {
     pub fn as_unsafe_storage<C: Component>(&self) -> &UnsafeStorage<C> {
         self.downcast_ref::<UnsafeStorage<C>>()
             .expect("Incorrect storage type")
@@ -922,93 +909,7 @@ impl<T> UnsafeStorage<T> {
     }
 }
 
-pub trait IteratorSoa: Sized {
-    type Output;
-    fn to_soa<I: Iterator<Item = Self>>(iter: I) -> Self::Output;
-}
-macro_rules! impl_iterator_soa {
-    ( $(($item: ident, $ty: ident )),*) => {
-        impl<$($ty),*> IteratorSoa for ($($ty,)*)
-        where
-            $(
-                $ty: Component,
-            )*
-        {
-            type Output = ($(Vec<$ty>,)*);
-            fn to_soa<Iter: Iterator<Item = Self>>(iter: Iter) -> Self::Output {
-                $(
-                    #[allow(non_snake_case)]
-                    let mut $ty = Vec::new();
-                )*
-                for ($($item,)*) in iter {
-                    $(
-                        $ty.push($item);
-                    )*
-                }
-                ($($ty,)*)
-            }
-        }
-    }
-}
-
-impl_iterator_soa!((a, A));
-impl_iterator_soa!((a, A), (b, B));
-impl_iterator_soa!((a, A), (b, B), (c, C));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F), (g, G));
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H)
-);
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H),
-    (i, I)
-);
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H),
-    (i, I),
-    (j, J)
-);
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H),
-    (i, I),
-    (j, J),
-    (k, K)
-);
-
-pub trait AppendComponents
-where
-    Self: IteratorSoa,
-{
+pub trait AppendComponents: Sized {
     fn is_match<S: Storage>(storage: &S) -> bool;
     fn append_components<I, S>(items: I, storage: &mut S) -> usize
     where
@@ -1017,7 +918,7 @@ where
 }
 
 macro_rules! impl_append_components {
-    ($size: expr => $($ty: ident),*) => {
+    ($($ty: ident),*) => {
         impl<$($ty),*> AppendComponents for ($($ty,)*)
         where
             $(
@@ -1025,10 +926,9 @@ macro_rules! impl_append_components {
             )*
         {
             fn is_match<S: Storage>(storage: &S) -> bool {
-                let types = storage.types();
-                let mut b = types.len() == $size;
+                let mut b = true;
                 $(
-                    b &= types.contains(&TypeId::of::<$ty>());
+                    b &= storage.contains::<$ty>();
                 )*
                 b
             }
@@ -1038,13 +938,13 @@ macro_rules! impl_append_components {
                 S: Storage,
                 Iter: IntoIterator<Item = Self>,
             {
-                let tuple = Self::to_soa(items.into_iter());
-                let len = tuple.0.len();
                 #[allow(non_snake_case)]
-                let ($($ty,)*) = tuple;
-                $(
-                    storage.push_components($ty);
-                )*
+                let len = items.into_iter().map(|($($ty,)*)| {
+                    $(
+                        #[allow(non_snake_case)]
+                        storage.push_component($ty);
+                    )*
+                }).count();
                 *storage.len_mut() += len;
                 len
             }
@@ -1052,17 +952,7 @@ macro_rules! impl_append_components {
     }
 }
 
-impl_append_components!(1  => A);
-impl_append_components!(2  => A, B);
-impl_append_components!(3  => A, B, C);
-impl_append_components!(4  => A, B, C, D);
-impl_append_components!(5  => A, B, C, D, E);
-impl_append_components!(6  => A, B, C, D, E, F);
-impl_append_components!(7  => A, B, C, D, E, F, G);
-impl_append_components!(8  => A, B, C, D, E, F, G, H);
-impl_append_components!(9  => A, B, C, D, E, F, G, H, I);
-impl_append_components!(10 => A, B, C, D, E, F, G, H, I, J);
-impl_append_components!(11 => A, B, C, D, E, F, G, H, I, J, K);
+expand!(impl_append_components, A, B, C, D, E, F, G, H, I, J, K);
 
 /// A runtime SoA storage. It stands for **S**tructure **o**f **A**rrays.
 ///
@@ -1087,8 +977,7 @@ impl_append_components!(11 => A, B, C, D, E, F, G, H, I, J, K);
 pub struct SoaStorage {
     len: usize,
     id: StorageId,
-    types: HashSet<TypeId>,
-    storages: HashMap<TypeId, Box<RuntimeStorage>>,
+    storages: HashMap<TypeId, Box<dyn RuntimeStorage>>,
 }
 unsafe impl Send for SoaStorage {}
 unsafe impl Sync for SoaStorage {}
@@ -1103,7 +992,6 @@ impl RegisterComponent for SoaStorage {
     fn register_component<C: Component>(&mut self) {
         // A `SoAStorage` is backed by `UnsafeStorage`.
         let type_id = TypeId::of::<C>();
-        self.types.insert(type_id);
         self.storages
             .insert(type_id, Box::new(UnsafeStorage::<C>::new()));
     }
@@ -1112,6 +1000,7 @@ impl RegisterComponent for SoaStorage {
 /// [`Storage`] allows to abstract over different types of storages. The most common storage that
 /// implements this trait is [`SoaStorage`].
 pub trait Storage: Sized {
+    fn get_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C>;
     fn len(&self) -> usize;
     fn len_mut(&mut self) -> &mut usize;
     fn id(&self) -> StorageId;
@@ -1131,7 +1020,6 @@ pub trait Storage: Sized {
     fn push_component<C: Component>(&mut self, component: C);
     /// Returns true if the [`Storage`] has an array of type `C`.
     fn contains<C: Component>(&self) -> bool;
-    fn types(&self) -> &HashSet<TypeId>;
     /// Removes **all** the components at the specified index.
     fn remove(&mut self, id: ComponentId) -> usize;
 }
@@ -1156,6 +1044,9 @@ impl SoaStorage {
 }
 
 impl Storage for SoaStorage {
+    fn get_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C> {
+        self.get_storage_mut()
+    }
     fn len(&self) -> usize {
         self.len
     }
@@ -1188,7 +1079,6 @@ impl Storage for SoaStorage {
     }
     fn empty(id: StorageId) -> Archetype<Self> {
         let storage = SoaStorage {
-            types: HashSet::new(),
             storages: HashMap::new(),
             id,
             len: 0,
@@ -1203,10 +1093,6 @@ impl Storage for SoaStorage {
     }
 
     fn contains<C: Component>(&self) -> bool {
-        self.types.contains(&TypeId::of::<C>())
-    }
-
-    fn types(&self) -> &HashSet<TypeId> {
-        &self.types
+        self.storages.contains_key(&TypeId::of::<C>())
     }
 }
