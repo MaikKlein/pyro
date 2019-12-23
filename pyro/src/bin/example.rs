@@ -19,14 +19,16 @@ fn main() {
     // Appends a single entity
     world.append_components(Some((Position(42.0), Velocity {})));
 
-    // Requests a mutable borrow to Position, and an immutable borrow to Velocity.
-    // Common queries can be reused with a typedef like this but it is not necessary.
+    // // Requests a mutable borrow to Position, and an immutable borrow to Velocity.
+    // // Common queries can be reused with a typedef like this but it is not necessary.
     type PosVelQuery = (Write<Position>, Read<Velocity>);
 
     // Retrieves all entities that have a Position and Velocity component as an iterator.
-    world.par_matcher::<PosVelQuery>().for_each(|(_pos, _vel)| {
-        // ...
-    });
+    world
+        .par_matcher::<(&mut Position, &Velocity)>()
+        .for_each(|(pos, vel)| {
+            // ...
+        });
 
     // The same query as above but also retrieves the entities and collects the entities into a
     // `Vec<Entity>`.

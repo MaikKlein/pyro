@@ -551,7 +551,16 @@ pub trait PushBorrow {
     /// Inserts a new borrow and returns true if it was successful.
     fn push_borrow(acccess: &mut Borrow) -> bool;
 }
+
 impl<T: Component> PushBorrow for Write<T> {
+    /// If a `Write` was already in a set, then we have detected multiple writes and this is not
+    /// allows.
+    fn push_borrow(borrow: &mut Borrow) -> bool {
+        borrow.writes.insert(TypeDef::of::<T>())
+    }
+}
+
+impl<T: Component> PushBorrow for &'_ mut T {
     /// If a `Write` was already in a set, then we have detected multiple writes and this is not
     /// allows.
     fn push_borrow(borrow: &mut Borrow) -> bool {
@@ -567,6 +576,13 @@ impl<T: Component> PushBorrow for Read<T> {
     }
 }
 
+impl<T: Component> PushBorrow for &'_ T {
+    /// Multiple reads are always allowed and therefor we can always return true
+    fn push_borrow(borrow: &mut Borrow) -> bool {
+        borrow.reads.insert(TypeDef::of::<T>());
+        true
+    }
+}
 
 macro_rules! expand {
     ($m: ident, $ty: ident) => {
@@ -577,7 +593,6 @@ macro_rules! expand {
         expand!{$m, $($tt),*}
     };
 }
-
 
 macro_rules! impl_register_borrow{
     ($($ty: ident),*) => {
@@ -703,8 +718,22 @@ impl<'s, C: Component> Fetch<'s> for Read<C> {
         Slice::from_slice(storage.component_mut::<C>())
     }
 }
+impl<'s, C: Component> Fetch<'s> for &'_ C {
+    type Component = C;
+    type Iter = Slice<'s, C>;
+    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
+        Slice::from_slice(storage.component_mut::<C>())
+    }
+}
 
 impl<'s, C: Component> Fetch<'s> for Write<C> {
+    type Component = C;
+    type Iter = SliceMut<'s, C>;
+    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
+        SliceMut::from_slice(storage.component_mut::<C>())
+    }
+}
+impl<'s, C: Component> Fetch<'s> for &'_ mut C {
     type Component = C;
     type Iter = SliceMut<'s, C>;
     unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
