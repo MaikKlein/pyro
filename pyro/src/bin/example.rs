@@ -1,4 +1,3 @@
-use rayon::iter::ParallelIterator;
 extern crate pyro;
 use pyro::{Entity, Read, World, Write};
 #[derive(Debug)]
@@ -25,7 +24,7 @@ fn main() {
 
     // Retrieves all entities that have a Position and Velocity component as an iterator.
     world
-        .par_matcher::<(&mut Position, &Velocity)>()
+        .matcher::<(&mut Position, &Velocity)>()
         .for_each(|(pos, _vel)| {
             println!("{:?}", pos)
         });

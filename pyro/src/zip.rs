@@ -1,4 +1,5 @@
-use crate::{expand, Index };
+use crate::{expand, Index};
+#[cfg(feature = "threading")]
 use rayon::iter::{
     plumbing::{bridge, Consumer, Producer, ProducerCallback, UnindexedConsumer},
     IndexedParallelIterator, ParallelIterator,
@@ -19,7 +20,10 @@ impl<Tuple> ZipSlice<'_, Tuple> {
         }
     }
 }
+
+#[cfg(feature = "threading")]
 struct ZipProducer<'a, Tuple>(ZipSlice<'a, Tuple>);
+
 macro_rules! impl_zip_iterator {
     ($($ty: ident),*) => {
         impl<'a, $($ty,)*> Iterator for ZipSlice<'a, ($($ty,)*)>
@@ -68,6 +72,7 @@ macro_rules! impl_zip_iterator {
             }
         }
 
+        #[cfg(feature = "threading")]
         impl<'a, $($ty,)*> Producer for ZipProducer<'a, ($($ty,)*)>
         where
             $(
@@ -91,6 +96,7 @@ macro_rules! impl_zip_iterator {
                 (left, right)
             }
         }
+        #[cfg(feature = "threading")]
         impl<'a, $($ty,)*> ParallelIterator for ZipSlice<'a, ($($ty,)*)>
         where
             $(
@@ -112,6 +118,7 @@ macro_rules! impl_zip_iterator {
                 Some(ExactSizeIterator::len(self))
             }
         }
+        #[cfg(feature = "threading")]
         impl<'a, $($ty,)*> IndexedParallelIterator for ZipSlice<'a, ($($ty,)*)>
         where
             $(

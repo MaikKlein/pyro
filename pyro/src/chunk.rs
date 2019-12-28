@@ -35,7 +35,6 @@ impl MetadataMap {
     }
 }
 
-
 /// A runtime SoA storage. It stands for **S**tructure **o**f **A**rrays.
 ///
 /// ```rust,ignore
@@ -232,12 +231,13 @@ mod tests {
             storage.extend((0..10).map(|i| (i as u32, Int(i as _))));
             // We remove the first one which swaps it with the last one
             storage.swap_remove(0);
-            println!("{:?}", storage.components::<u32>());
-            let last: u32 = *storage.components().last().unwrap();
-            assert_eq!(last, 8);
-            let first: u32 = *storage.components().first().unwrap();
-            assert_eq!(first, 9);
-            unsafe { assert_eq!(DROP_COUNTER.load(Ordering::SeqCst), 1) }
+            unsafe {
+                let last: u32 = *storage.components_raw().get(8);
+                assert_eq!(last, 8);
+                let first: u32 = *storage.components_raw().get(0);
+                assert_eq!(first, 9);
+                assert_eq!(DROP_COUNTER.load(Ordering::SeqCst), 1)
+            }
         }
         unsafe { assert_eq!(DROP_COUNTER.load(Ordering::SeqCst), 10) }
     }

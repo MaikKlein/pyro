@@ -67,13 +67,12 @@
 //!
 //! ```
 //! extern crate pyro;
-//! use pyro::{ World, Entity, Read, Write, SoaStorage };
+//! use pyro::{ World, Entity, Read, Write};
 //! struct Position;
 //! struct Velocity;
 //!
 //!
-//! // By default creates a world backed by a [`SoaStorage`]
-//! let mut world: World<SoaStorage> = World::new();
+//! let mut world: World = World::new();
 //! let add_pos_vel = (0..99).map(|_| (Position{}, Velocity{}));
 //! //                                 ^^^^^^^^^^^^^^^^^^^^^^^^
 //! //                                 A tuple of (Position, Velocity),
@@ -107,26 +106,22 @@
 //! let count = world.matcher::<PosVelQuery>().count();
 //! assert_eq!(count, 0);
 //! ```
-extern crate log;
-extern crate parking_lot;
-extern crate rayon;
-extern crate typedef;
-extern crate vec_map;
 
-pub mod chunk;
+mod chunk;
 mod slice;
 mod zip;
 use chunk::{MetadataMap, Storage};
 use log::debug;
 use parking_lot::Mutex;
-use rayon::iter::plumbing::UnindexedConsumer;
-pub use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+#[cfg(feature = "threading")]
+pub use rayon::iter::{plumbing::UnindexedConsumer, IntoParallelRefIterator, ParallelIterator};
 use slice::{Slice, SliceMut};
-use std::collections::HashSet;
-use std::iter::FusedIterator;
-use std::iter::{ExactSizeIterator, IntoIterator};
-use std::marker::PhantomData;
-use std::num::Wrapping;
+use std::{
+    collections::HashSet,
+    iter::{ExactSizeIterator, FusedIterator, IntoIterator},
+    marker::PhantomData,
+    num::Wrapping,
+};
 use typedef::TypeDef;
 use vec_map::VecMap;
 use zip::ZipSlice;
@@ -137,9 +132,13 @@ pub type Version = u16;
 
 pub trait Index<'a>: Sized {
     type Item;
+    /// # Safety
     unsafe fn get_unchecked(&self, idx: usize) -> Self::Item;
     fn split_at(self, idx: usize) -> (Self, Self);
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// The [`Iterator`] is used to end a borrow from a query like [`World::matcher`].
@@ -148,6 +147,7 @@ pub struct BorrowIter<'s, I> {
     iter: I,
 }
 
+#[cfg(feature = "threading")]
 impl<'s, I> ParallelIterator for BorrowIter<'s, Option<I>>
 where
     I: ParallelIterator,
@@ -288,6 +288,7 @@ impl World {
             });
         }
     }
+    #[cfg(feature = "threading")]
     pub fn par_matcher<'s, Q>(
         &'s self,
     ) -> impl ParallelIterator<Item = <<Q as ParQuery<'s>>::Iter as ParallelIterator>::Item> + 's
@@ -332,7 +333,7 @@ impl World {
                 .iter()
                 .filter(|&storage| Q::is_match(storage))
                 .map(|storage| Q::query(storage))
-                .flat_map(|iter| iter)
+                .flatten()
         };
         BorrowIter { world: self, iter }
     }
@@ -703,6 +704,7 @@ pub struct Write<C>(PhantomData<C>);
 pub trait Fetch<'s> {
     type Component: Component;
     type Iter: Index<'s>;
+    /// # Safety
     unsafe fn fetch(storage: &'s Storage) -> Self::Iter;
 }
 
@@ -744,9 +746,11 @@ pub trait Matcher {
 pub trait Query<'s> {
     type Borrow;
     type Iter: Iterator + 's;
+    /// # Safety
     unsafe fn query(storage: &'s Storage) -> Self::Iter;
 }
 /// Allows to query multiple components from a [`Storage`] in parallel.
+#[cfg(feature = "threading")]
 pub trait ParQuery<'s> {
     type Borrow;
     type Iter: ParallelIterator + 's;
@@ -760,7 +764,7 @@ where
     type Item = &'a T;
     #[inline]
     unsafe fn get_unchecked(&self, idx: usize) -> Self::Item {
-        &*self.start.offset(idx as _)
+        &*self.start.add(idx)
     }
     #[inline]
     fn len(&self) -> usize {
@@ -777,7 +781,7 @@ where
     type Item = &'a mut T;
     #[inline]
     unsafe fn get_unchecked(&self, idx: usize) -> Self::Item {
-        &mut *self.start.offset(idx as _)
+        &mut *self.start.add(idx)
     }
     #[inline]
     fn len(&self) -> usize {
@@ -814,6 +818,7 @@ macro_rules! impl_matcher_default {
                 ZipSlice::new(($($ty::fetch(storage),)*))
             }
         }
+        #[cfg(feature = "threading")]
         impl<'s, $($ty,)*> ParQuery<'s> for ($($ty,)*)
         where
             $(
@@ -833,26 +838,25 @@ macro_rules! impl_matcher_default {
 
 expand!(impl_matcher_default, A, B, C, D, E, F, G, H, I);
 
-//impl<'s, A> Query<'s> for A
-//where
-//    A: Fetch<'s>,
-//{
-//    type Borrow = A;
-//    type Iter = A::Iter;
-//    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
-//        unimplemented!()
-//        //A::fetch(storage)
-//    }
-//}
+impl<'s, A> Query<'s> for A
+where
+    A: Fetch<'s> + 's,
+{
+    type Borrow = A;
+    type Iter = ZipSlice<'s, (A::Iter,)>;
+    unsafe fn query(storage: &'s Storage) -> Self::Iter {
+        ZipSlice::new((A::fetch(storage),))
+    }
+}
 
-// impl<A> Matcher for A
-// where
-//     A: for<'s> Fetch<'s>,
-// {
-//     fn is_match<S: Storage>(storage: &S) -> bool {
-//         storage.contains::<A::Component>()
-//     }
-// }
+impl<A> Matcher for A
+where
+    A: for<'s> Fetch<'s>,
+{
+    fn is_match(storage: &Storage) -> bool {
+        storage.contains::<A::Component>()
+    }
+}
 
 /// [`BuildStorage`] is used to create different [`Storage`]s at runtime. See also
 /// [`AppendComponents`] and [`World::append_components`]
