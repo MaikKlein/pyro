@@ -10,9 +10,7 @@ documentation = "https://docs.rs/pyro"
 description = "Entity component system"
 
 [dependencies]
-itertools = "0.7"
 rayon = "1"
-downcast-rs = "1.0"
 parking_lot = "0.6"
 vec_map = "0.8"
 log = "0.4"

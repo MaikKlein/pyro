@@ -1,14 +1,14 @@
 use rayon::iter::ParallelIterator;
 extern crate pyro;
-use pyro::{Entity, Read, SoaStorage, World, Write};
+use pyro::{Entity, Read, World, Write};
 #[derive(Debug)]
 struct Position(f32);
 struct Velocity;
 
 fn main() {
     // By default creates a world backed by a [`SoaStorage`]
-    let mut world: World<SoaStorage> = World::new();
-    let add_pos_vel = (0..9999).map(|i| (Position(i as f32), Velocity {}));
+    let mut world: World = World::new();
+    let add_pos_vel = (0..10).map(|i| (Position(i as f32), Velocity {}));
     //                                 ^^^^^^^^^^^^^^^^^^^^^^^^
     //                                 A tuple of (Position, Velocity),
     //                                 Note: Order does *not* matter
@@ -25,9 +25,9 @@ fn main() {
 
     // Retrieves all entities that have a Position and Velocity component as an iterator.
     world
-        .par_matcher::<(&mut Position, &Velocity)>()
-        .for_each(|(pos, vel)| {
-            // ...
+        .matcher::<(&mut Position, &Velocity)>()
+        .for_each(|(pos, _vel)| {
+            println!("{:?}", pos)
         });
 
     // The same query as above but also retrieves the entities and collects the entities into a
