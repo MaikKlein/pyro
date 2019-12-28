@@ -25,7 +25,7 @@ fn main() {
 
     // Retrieves all entities that have a Position and Velocity component as an iterator.
     world
-        .matcher::<(&mut Position, &Velocity)>()
+        .par_matcher::<(&mut Position, &Velocity)>()
         .for_each(|(pos, _vel)| {
             println!("{:?}", pos)
         });

@@ -1,4 +1,4 @@
-use crate::Index;
+use crate::{expand, Index };
 use rayon::iter::{
     plumbing::{bridge, Consumer, Producer, ProducerCallback, UnindexedConsumer},
     IndexedParallelIterator, ParallelIterator,
@@ -140,12 +140,4 @@ macro_rules! impl_zip_iterator {
     };
 }
 
-impl_zip_iterator!(A);
-impl_zip_iterator!(A, B);
-impl_zip_iterator!(A, B, C);
-impl_zip_iterator!(A, B, C, D);
-impl_zip_iterator!(A, B, C, D, E);
-impl_zip_iterator!(A, B, C, D, E, F);
-impl_zip_iterator!(A, B, C, D, E, F, G);
-impl_zip_iterator!(A, B, C, D, E, F, G, H);
-impl_zip_iterator!(A, B, C, D, E, F, G, H, I);
+expand!(impl_zip_iterator, A, B, C, D, E, F, G, H, I);

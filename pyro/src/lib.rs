@@ -814,20 +814,20 @@ macro_rules! impl_matcher_default {
                 ZipSlice::new(($($ty::fetch(storage),)*))
             }
         }
-        // impl<'s, $($ty,)*> ParQuery<'s> for ($($ty,)*)
-        // where
-        //     $(
-        //         $ty: Fetch<'s> + Send + Sync + 's,
-        //         <$ty as Fetch<'s>>::Iter: Send + Sync,
-        //         <<$ty as Fetch<'s>>::Iter as Index<'s>>::Item: Send + Sync,
-        //     )*
-        // {
-        //     type Borrow = ($($ty,)*);
-        //     type Iter = ZipSlice<'s, ($($ty::Iter,)*)>;
-        //     unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
-        //         ZipSlice::new(($($ty::fetch(storage),)*))
-        //     }
-        // }
+        impl<'s, $($ty,)*> ParQuery<'s> for ($($ty,)*)
+        where
+            $(
+                $ty: Fetch<'s> + Send + Sync + 's,
+                <$ty as Fetch<'s>>::Iter: Send + Sync,
+                <<$ty as Fetch<'s>>::Iter as Index<'s>>::Item: Send + Sync,
+            )*
+        {
+            type Borrow = ($($ty,)*);
+            type Iter = ZipSlice<'s, ($($ty::Iter,)*)>;
+            unsafe fn query(storage: &'s Storage) -> Self::Iter {
+                ZipSlice::new(($($ty::fetch(storage),)*))
+            }
+        }
     }
 }
 
