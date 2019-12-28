@@ -67,13 +67,12 @@
 //!
 //! ```
 //! extern crate pyro;
-//! use pyro::{ World, Entity, Read, Write, SoaStorage };
+//! use pyro::{ World, Entity, Read, Write};
 //! struct Position;
 //! struct Velocity;
 //!
 //!
-//! // By default creates a world backed by a [`SoaStorage`]
-//! let mut world: World<SoaStorage> = World::new();
+//! let mut world: World = World::new();
 //! let add_pos_vel = (0..99).map(|_| (Position{}, Velocity{}));
 //! //                                 ^^^^^^^^^^^^^^^^^^^^^^^^
 //! //                                 A tuple of (Position, Velocity),
@@ -107,28 +106,22 @@
 //! let count = world.matcher::<PosVelQuery>().count();
 //! assert_eq!(count, 0);
 //! ```
-extern crate downcast_rs;
-extern crate log;
-extern crate parking_lot;
-extern crate rayon;
-extern crate typedef;
-extern crate vec_map;
 
+mod chunk;
 mod slice;
 mod zip;
-use downcast_rs::{impl_downcast, Downcast};
+use chunk::{MetadataMap, Storage};
 use log::debug;
 use parking_lot::Mutex;
-use rayon::iter::plumbing::UnindexedConsumer;
-pub use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+#[cfg(feature = "threading")]
+pub use rayon::iter::{plumbing::UnindexedConsumer, IntoParallelRefIterator, ParallelIterator};
 use slice::{Slice, SliceMut};
-use std::any::TypeId;
-use std::cell::UnsafeCell;
-use std::collections::{HashMap, HashSet};
-use std::iter::FusedIterator;
-use std::iter::{ExactSizeIterator, IntoIterator};
-use std::marker::PhantomData;
-use std::num::Wrapping;
+use std::{
+    collections::HashSet,
+    iter::{ExactSizeIterator, FusedIterator, IntoIterator},
+    marker::PhantomData,
+    num::Wrapping,
+};
 use typedef::TypeDef;
 use vec_map::VecMap;
 use zip::ZipSlice;
@@ -139,21 +132,25 @@ pub type Version = u16;
 
 pub trait Index<'a>: Sized {
     type Item;
+    /// # Safety
     unsafe fn get_unchecked(&self, idx: usize) -> Self::Item;
     fn split_at(self, idx: usize) -> (Self, Self);
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// The [`Iterator`] is used to end a borrow from a query like [`World::matcher`].
-pub struct BorrowIter<'s, S, I> {
-    world: &'s World<S>,
+pub struct BorrowIter<'s, I> {
+    world: &'s World,
     iter: I,
 }
 
-impl<'s, S, I> ParallelIterator for BorrowIter<'s, S, Option<I>>
+#[cfg(feature = "threading")]
+impl<'s, I> ParallelIterator for BorrowIter<'s, Option<I>>
 where
     I: ParallelIterator,
-    S: Send + Sync,
 {
     type Item = I::Item;
     fn drive_unindexed<C>(mut self, consumer: C) -> C::Result
@@ -163,7 +160,7 @@ where
         self.iter.take().unwrap().drive_unindexed(consumer)
     }
 }
-impl<'s, S, I> Iterator for BorrowIter<'s, S, I>
+impl<'s, I> Iterator for BorrowIter<'s, I>
 where
     I: Iterator,
 {
@@ -178,9 +175,9 @@ where
     }
 }
 
-impl<'s, S, I> FusedIterator for BorrowIter<'s, S, I> where I: FusedIterator {}
+impl<'s, I> FusedIterator for BorrowIter<'s, I> where I: FusedIterator {}
 
-impl<'s, S, I> ExactSizeIterator for BorrowIter<'s, S, I>
+impl<'s, I> ExactSizeIterator for BorrowIter<'s, I>
 where
     I: ExactSizeIterator,
 {
@@ -189,7 +186,7 @@ where
     }
 }
 
-impl<'s, S, I> Drop for BorrowIter<'s, S, I> {
+impl<'s, I> Drop for BorrowIter<'s, I> {
     fn drop(&mut self) {
         self.world.runtime_borrow.lock().pop_access();
     }
@@ -211,7 +208,7 @@ pub struct Entity {
 
 /// [`World`] is the heart of this library. It owns all the [`Component`]s and [`Storage`]s.
 /// It also manages entities and allows [`Component`]s to be safely queried.
-pub struct World<S = SoaStorage> {
+pub struct World {
     /// Storages need to be linear, that is why deletion will use [`Vec::swap_remove`] under the
     /// hood. But this moves the components around and we need to keep track of those swaps. This
     /// map is then used to find the correct [`ComponentId`] for an [`Entity`]. This maps the
@@ -222,19 +219,19 @@ pub struct World<S = SoaStorage> {
     /// When we remove an [`Entity`], we will put it in this free map to be reused.
     free_map: Vec<Vec<ComponentId>>,
     version: Vec<Vec<Wrapping<Version>>>,
-    storages: Vec<S>,
+    storages: Vec<Storage>,
     /// The runtime borrow system. See [`RuntimeBorrow`] for more information. It is also wrapped
     /// in a Mutex so that we can keep track of multiple borrows on different threads.
     runtime_borrow: Mutex<RuntimeBorrow>,
 }
 
-impl<S> Default for World<S> {
+impl Default for World {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S> World<S> {
+impl World {
     /// Creates an empty [`World`].
     pub fn new() -> Self {
         World {
@@ -248,10 +245,7 @@ impl<S> World<S> {
     }
 }
 
-impl<S> World<S>
-where
-    S: Storage + Send + Sync,
-{
+impl World {
     /// Creates an `Iterator` over every [`Entity`] inside [`World`]. The entities are
     /// not ordered.
     pub fn entities<'s>(&'s self) -> impl Iterator<Item = Entity> + 's {
@@ -294,6 +288,7 @@ where
             });
         }
     }
+    #[cfg(feature = "threading")]
     pub fn par_matcher<'s, Q>(
         &'s self,
     ) -> impl ParallelIterator<Item = <<Q as ParQuery<'s>>::Iter as ParallelIterator>::Item> + 's
@@ -338,7 +333,7 @@ where
                 .iter()
                 .filter(|&storage| Q::is_match(storage))
                 .map(|storage| Q::query(storage))
-                .flat_map(|iter| iter)
+                .flatten()
         };
         BorrowIter { world: self, iter }
     }
@@ -374,10 +369,7 @@ where
         BorrowIter { world: self, iter }
     }
 }
-impl<S> World<S>
-where
-    S: Storage + RegisterComponent,
-{
+impl World {
     /// Appends the components and also creates the necessary [`Entity`]s behind the scenes.
     /// If you only want to append a single set of components then you can do
     /// ```rust,ignore
@@ -389,17 +381,18 @@ where
         I: IntoIterator<Item = A>,
     {
         // Try to find a matching storage, and insert the components
-        let (storage_id, insert_count) = if let Some(storage) = self
+        let (storage_id, insert_count) = if let Some((id, storage)) = self
             .storages
             .iter_mut()
-            .find(|storage| A::is_match::<S>(storage))
+            .enumerate()
+            .find(|(_, storage)| A::is_match(storage))
         {
             let len = A::append_components(i, storage);
-            (storage.id(), len)
+            (id as StorageId, len)
         } else {
             // if we did not find a storage, we need to create one
             let id = self.storages.len() as StorageId;
-            let mut storage = <A as BuildStorage>::build::<S>(id).build();
+            let mut storage = <A as BuildStorage>::build();
             let len = A::append_components(i, &mut storage);
             self.storages.push(storage);
             // Also we need to add an entity Vec for that storage
@@ -468,28 +461,30 @@ where
 
     /// Retrieves a component for a specific [`Entity`].
     pub fn get_component<C: Component>(&self, e: Entity) -> Option<&C> {
-        unsafe {
-            let storage = &self.storages[e.storage_id as usize];
-            if !storage.contains::<C>() || !self.is_entity_valid(e) {
-                return None;
-            }
-            let component_id = self.component_map[e.storage_id as usize][e.id as usize];
-            storage.component::<C>().get(component_id as usize)
+        let storage = &self.storages[e.storage_id as usize];
+        if !storage.contains::<C>() || !self.is_entity_valid(e) {
+            return None;
         }
+        let component_id = self.component_map[e.storage_id as usize][e.id as usize];
+        storage
+            .components_raw::<C>()
+            .try_get(component_id as usize)
+            .map(|ptr| unsafe { &*ptr })
     }
 
     /// Same as [`World::get_component`] but mutable.
     // [TODO]: Possibly make this immutable and add the runtime borrow system if &mut isn't
     // flexible enough.
     pub fn get_component_mut<C: Component>(&mut self, e: Entity) -> Option<&mut C> {
-        unsafe {
-            let storage = &self.storages[e.storage_id as usize];
-            if !storage.contains::<C>() || !self.is_entity_valid(e) {
-                return None;
-            }
-            let component_id = self.component_map[e.storage_id as usize][e.id as usize];
-            storage.component_mut::<C>().get_mut(component_id as usize)
+        let storage = &self.storages[e.storage_id as usize];
+        if !storage.contains::<C>() || !self.is_entity_valid(e) {
+            return None;
         }
+        let component_id = self.component_map[e.storage_id as usize][e.id as usize];
+        storage
+            .components_mut_raw::<C>()
+            .try_get_mut(component_id as usize)
+            .map(|ptr| unsafe { &mut *ptr })
     }
 
     /// Removes the specified entities from [`World`]. Those entities are now considered invalid,
@@ -510,7 +505,7 @@ where
                 .expect("component id");
             // [FIXME]: This uses dynamic dispatch so we might want to batch entities
             // together to reduce the overhead.
-            let swap = self.storages[storage_id].remove(component_id) as ComponentId;
+            let swap = self.storages[storage_id].swap_remove(component_id as _) as ComponentId;
             // We need to keep track which entity was deleted and which was swapped.
             debug!(
                 "- Entitiy id: {}, Component id: {}, Swap: {}, Map length: {}, Storage length: {}",
@@ -551,7 +546,16 @@ pub trait PushBorrow {
     /// Inserts a new borrow and returns true if it was successful.
     fn push_borrow(acccess: &mut Borrow) -> bool;
 }
+
 impl<T: Component> PushBorrow for Write<T> {
+    /// If a `Write` was already in a set, then we have detected multiple writes and this is not
+    /// allows.
+    fn push_borrow(borrow: &mut Borrow) -> bool {
+        borrow.writes.insert(TypeDef::of::<T>())
+    }
+}
+
+impl<T: Component> PushBorrow for &'_ mut T {
     /// If a `Write` was already in a set, then we have detected multiple writes and this is not
     /// allows.
     fn push_borrow(borrow: &mut Borrow) -> bool {
@@ -565,6 +569,25 @@ impl<T: Component> PushBorrow for Read<T> {
         borrow.reads.insert(TypeDef::of::<T>());
         true
     }
+}
+
+impl<T: Component> PushBorrow for &'_ T {
+    /// Multiple reads are always allowed and therefor we can always return true
+    fn push_borrow(borrow: &mut Borrow) -> bool {
+        borrow.reads.insert(TypeDef::of::<T>());
+        true
+    }
+}
+
+#[macro_export]
+macro_rules! expand {
+    ($m: ident, $ty: ident) => {
+        $m!{$ty}
+    };
+    ($m: ident, $ty: ident, $($tt: ident),*) => {
+        $m!{$ty, $($tt),*}
+        expand!{$m, $($tt),*}
+    };
 }
 
 macro_rules! impl_register_borrow{
@@ -589,14 +612,7 @@ macro_rules! impl_register_borrow{
     }
 }
 
-impl_register_borrow!(A);
-impl_register_borrow!(A, B);
-impl_register_borrow!(A, B, C);
-impl_register_borrow!(A, B, C, D);
-impl_register_borrow!(A, B, C, D, E);
-impl_register_borrow!(A, B, C, D, E, F);
-impl_register_borrow!(A, B, C, D, E, F, G);
-impl_register_borrow!(A, B, C, D, E, F, G, H);
+expand!(impl_register_borrow, A, B, C, D, E, F, G, H);
 
 /// Rust's borrowing rules are not flexible enough for an *ECS*. Often it would preferred to nest multiple
 /// queries like [`World::matcher`], but this is not possible if both borrows would be mutable.
@@ -688,40 +704,57 @@ pub struct Write<C>(PhantomData<C>);
 pub trait Fetch<'s> {
     type Component: Component;
     type Iter: Index<'s>;
-    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter;
+    /// # Safety
+    unsafe fn fetch(storage: &'s Storage) -> Self::Iter;
 }
 
 impl<'s, C: Component> Fetch<'s> for Read<C> {
     type Component = C;
     type Iter = Slice<'s, C>;
-    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
-        Slice::from_slice(storage.component_mut::<C>())
+    unsafe fn fetch(storage: &'s Storage) -> Self::Iter {
+        storage.components_raw::<C>()
+    }
+}
+impl<'s, C: Component> Fetch<'s> for &'_ C {
+    type Component = C;
+    type Iter = Slice<'s, C>;
+    unsafe fn fetch(storage: &'s Storage) -> Self::Iter {
+        storage.components_raw::<C>()
     }
 }
 
 impl<'s, C: Component> Fetch<'s> for Write<C> {
     type Component = C;
     type Iter = SliceMut<'s, C>;
-    unsafe fn fetch<S: Storage>(storage: &'s S) -> Self::Iter {
-        SliceMut::from_slice(storage.component_mut::<C>())
+    unsafe fn fetch(storage: &'s Storage) -> Self::Iter {
+        storage.components_mut_raw::<C>()
+    }
+}
+impl<'s, C: Component> Fetch<'s> for &'_ mut C {
+    type Component = C;
+    type Iter = SliceMut<'s, C>;
+    unsafe fn fetch(storage: &'s Storage) -> Self::Iter {
+        storage.components_mut_raw::<C>()
     }
 }
 
 /// Allows to match over different [`Storage`]s.
 pub trait Matcher {
-    fn is_match<S: Storage>(storage: &S) -> bool;
+    fn is_match(storage: &Storage) -> bool;
 }
 /// Allows to query multiple components from a [`Storage`].
 pub trait Query<'s> {
     type Borrow;
     type Iter: Iterator + 's;
-    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
+    /// # Safety
+    unsafe fn query(storage: &'s Storage) -> Self::Iter;
 }
 /// Allows to query multiple components from a [`Storage`] in parallel.
+#[cfg(feature = "threading")]
 pub trait ParQuery<'s> {
     type Borrow;
     type Iter: ParallelIterator + 's;
-    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter;
+    unsafe fn query(storage: &'s Storage) -> Self::Iter;
 }
 
 impl<'a, T> Index<'a> for Slice<'a, T>
@@ -731,7 +764,7 @@ where
     type Item = &'a T;
     #[inline]
     unsafe fn get_unchecked(&self, idx: usize) -> Self::Item {
-        &*self.start.offset(idx as _)
+        &*self.start.add(idx)
     }
     #[inline]
     fn len(&self) -> usize {
@@ -748,7 +781,7 @@ where
     type Item = &'a mut T;
     #[inline]
     unsafe fn get_unchecked(&self, idx: usize) -> Self::Item {
-        &mut *self.start.offset(idx as _)
+        &mut *self.start.add(idx)
     }
     #[inline]
     fn len(&self) -> usize {
@@ -767,7 +800,7 @@ macro_rules! impl_matcher_default {
                 $ty: for<'s> Fetch<'s>,
             )*
         {
-            fn is_match<S: Storage>(storage: &S) -> bool {
+            fn is_match(storage: &Storage) -> bool {
                 $(
                     storage.contains::<$ty::Component>()
                 )&&*
@@ -781,10 +814,11 @@ macro_rules! impl_matcher_default {
         {
             type Borrow = ($($ty,)*);
             type Iter = ZipSlice<'s, ($($ty::Iter,)*)>;
-            unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
+            unsafe fn query(storage: &'s Storage) -> Self::Iter {
                 ZipSlice::new(($($ty::fetch(storage),)*))
             }
         }
+        #[cfg(feature = "threading")]
         impl<'s, $($ty,)*> ParQuery<'s> for ($($ty,)*)
         where
             $(
@@ -795,66 +829,39 @@ macro_rules! impl_matcher_default {
         {
             type Borrow = ($($ty,)*);
             type Iter = ZipSlice<'s, ($($ty::Iter,)*)>;
-            unsafe fn query<S1: Storage>(storage: &'s S1) -> Self::Iter {
+            unsafe fn query(storage: &'s Storage) -> Self::Iter {
                 ZipSlice::new(($($ty::fetch(storage),)*))
             }
         }
     }
 }
 
-impl_matcher_default!(A);
-impl_matcher_default!(A, B);
-impl_matcher_default!(A, B, C);
-impl_matcher_default!(A, B, C, D);
-impl_matcher_default!(A, B, C, D, E);
-impl_matcher_default!(A, B, C, D, E, F);
-impl_matcher_default!(A, B, C, D, E, F, G);
-impl_matcher_default!(A, B, C, D, E, F, G, H);
-impl_matcher_default!(A, B, C, D, E, F, G, H, I);
+expand!(impl_matcher_default, A, B, C, D, E, F, G, H, I);
 
-//impl<'s, A> Query<'s> for A
-//where
-//    A: Fetch<'s>,
-//{
-//    type Borrow = A;
-//    type Iter = A::Iter;
-//    unsafe fn query<S: Storage>(storage: &'s S) -> Self::Iter {
-//        unimplemented!()
-//        //A::fetch(storage)
-//    }
-//}
+impl<'s, A> Query<'s> for A
+where
+    A: Fetch<'s> + 's,
+{
+    type Borrow = A;
+    type Iter = ZipSlice<'s, (A::Iter,)>;
+    unsafe fn query(storage: &'s Storage) -> Self::Iter {
+        ZipSlice::new((A::fetch(storage),))
+    }
+}
 
 impl<A> Matcher for A
 where
     A: for<'s> Fetch<'s>,
 {
-    fn is_match<S: Storage>(storage: &S) -> bool {
+    fn is_match(storage: &Storage) -> bool {
         storage.contains::<A::Component>()
-    }
-}
-
-/// Acts as a builder for a new [`Storage`]. [`Component`]s can be registered, and then the `Storage`
-/// can be build with [`Archetype::build`].
-pub struct Archetype<S> {
-    storage: S,
-}
-
-impl<S> Archetype<S>
-where
-    S: Storage + RegisterComponent,
-{
-    pub fn register_component<C: Component>(&mut self) {
-        self.storage.register_component::<C>();
-    }
-    pub fn build(self) -> S {
-        self.storage
     }
 }
 
 /// [`BuildStorage`] is used to create different [`Storage`]s at runtime. See also
 /// [`AppendComponents`] and [`World::append_components`]
 pub trait BuildStorage {
-    fn build<S: Storage + RegisterComponent>(id: StorageId) -> Archetype<S>;
+    fn build() -> Storage;
 }
 
 macro_rules! impl_build_storage {
@@ -865,348 +872,53 @@ macro_rules! impl_build_storage {
                 $ty:Component,
             )*
         {
-            fn build<S: Storage + RegisterComponent>(id: StorageId) -> Archetype<S> {
-                let mut empty = S::empty(id);
+            fn build() -> Storage {
+                let mut meta = MetadataMap::new();
                 $(
-                    empty.register_component::<$ty>();
+                    meta.insert::<$ty>();
                 )*
-                empty
-            }
-        }
-    }
-}
-impl_build_storage!(A);
-impl_build_storage!(A, B);
-impl_build_storage!(A, B, C);
-impl_build_storage!(A, B, C, D);
-impl_build_storage!(A, B, C, D, E);
-impl_build_storage!(A, B, C, D, E, F);
-impl_build_storage!(A, B, C, D, E, F, G);
-impl_build_storage!(A, B, C, D, E, F, G, H);
-impl_build_storage!(A, B, C, D, E, F, G, H, I);
-// impl_build_storage!(A, B, C, D, E, F, G, H, I);
-// impl_build_storage!(A, B, C, D, E, F, G, H, I, J);
-// impl_build_storage!(A, B, C, D, E, F, G, H, I, J, k);
-
-pub trait RuntimeStorage: Downcast {
-    fn remove(&mut self, id: ComponentId);
-}
-
-impl_downcast!(RuntimeStorage);
-impl RuntimeStorage {
-    pub fn as_unsafe_storage<C: Component>(&self) -> &UnsafeStorage<C> {
-        self.downcast_ref::<UnsafeStorage<C>>()
-            .expect("Incorrect storage type")
-    }
-    pub fn as_unsafe_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C> {
-        self.downcast_mut::<UnsafeStorage<C>>()
-            .expect("Incorrect storage type")
-    }
-}
-
-impl<T: Component> RuntimeStorage for UnsafeStorage<T> {
-    fn remove(&mut self, id: ComponentId) {
-        unsafe {
-            (*self.inner_mut()).swap_remove(id as usize);
-        }
-    }
-}
-
-pub struct UnsafeStorage<T>(UnsafeCell<Vec<T>>);
-impl<T> UnsafeStorage<T> {
-    pub fn new() -> Self {
-        UnsafeStorage(UnsafeCell::new(Vec::<T>::new()))
-    }
-    pub unsafe fn inner_mut(&self) -> *mut Vec<T> {
-        self.0.get()
-    }
-}
-
-pub trait IteratorSoa: Sized {
-    type Output;
-    fn to_soa<I: Iterator<Item = Self>>(iter: I) -> Self::Output;
-}
-macro_rules! impl_iterator_soa {
-    ( $(($item: ident, $ty: ident )),*) => {
-        impl<$($ty),*> IteratorSoa for ($($ty,)*)
-        where
-            $(
-                $ty: Component,
-            )*
-        {
-            type Output = ($(Vec<$ty>,)*);
-            fn to_soa<Iter: Iterator<Item = Self>>(iter: Iter) -> Self::Output {
-                $(
-                    #[allow(non_snake_case)]
-                    let mut $ty = Vec::new();
-                )*
-                for ($($item,)*) in iter {
-                    $(
-                        $ty.push($item);
-                    )*
-                }
-                ($($ty,)*)
+                Storage::new(meta)
             }
         }
     }
 }
 
-impl_iterator_soa!((a, A));
-impl_iterator_soa!((a, A), (b, B));
-impl_iterator_soa!((a, A), (b, B), (c, C));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F));
-impl_iterator_soa!((a, A), (b, B), (c, C), (d, D), (e, E), (f, F), (g, G));
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H)
-);
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H),
-    (i, I)
-);
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H),
-    (i, I),
-    (j, J)
-);
-impl_iterator_soa!(
-    (a, A),
-    (b, B),
-    (c, C),
-    (d, D),
-    (e, E),
-    (f, F),
-    (g, G),
-    (h, H),
-    (i, I),
-    (j, J),
-    (k, K)
-);
+expand!(impl_build_storage, A, B, C, D, E, F, G, H, I);
 
-pub trait AppendComponents
-where
-    Self: IteratorSoa,
-{
-    fn is_match<S: Storage>(storage: &S) -> bool;
-    fn append_components<I, S>(items: I, storage: &mut S) -> usize
+pub trait AppendComponents: Sized {
+    fn is_match(storage: &Storage) -> bool;
+    fn append_components<I>(items: I, storage: &mut Storage) -> usize
     where
-        S: Storage,
         I: IntoIterator<Item = Self>;
 }
 
 macro_rules! impl_append_components {
-    ($size: expr => $($ty: ident),*) => {
+    ($($ty: ident),*) => {
         impl<$($ty),*> AppendComponents for ($($ty,)*)
         where
             $(
                 $ty: Component,
             )*
         {
-            fn is_match<S: Storage>(storage: &S) -> bool {
-                let types = storage.types();
-                let mut b = types.len() == $size;
+            fn is_match(storage: &Storage) -> bool{
                 $(
-                    b &= types.contains(&TypeId::of::<$ty>());
-                )*
-                b
+                    storage.contains::<$ty>()
+                )&&*
             }
-
-            fn append_components<Iter, S>(items: Iter, storage: &mut S) -> usize
+            fn append_components<Iter>(items: Iter, storage: &mut Storage) -> usize
             where
-                S: Storage,
                 Iter: IntoIterator<Item = Self>,
             {
-                let tuple = Self::to_soa(items.into_iter());
-                let len = tuple.0.len();
-                #[allow(non_snake_case)]
-                let ($($ty,)*) = tuple;
-                $(
-                    storage.push_components($ty);
-                )*
-                *storage.len_mut() += len;
-                len
+                let mut count = 0;
+                let iter = items.into_iter().map(|item| {
+                    count += 1;
+                    item
+                });
+                storage.extend(iter);
+                count
             }
         }
     }
 }
 
-impl_append_components!(1  => A);
-impl_append_components!(2  => A, B);
-impl_append_components!(3  => A, B, C);
-impl_append_components!(4  => A, B, C, D);
-impl_append_components!(5  => A, B, C, D, E);
-impl_append_components!(6  => A, B, C, D, E, F);
-impl_append_components!(7  => A, B, C, D, E, F, G);
-impl_append_components!(8  => A, B, C, D, E, F, G, H);
-impl_append_components!(9  => A, B, C, D, E, F, G, H, I);
-impl_append_components!(10 => A, B, C, D, E, F, G, H, I, J);
-impl_append_components!(11 => A, B, C, D, E, F, G, H, I, J, K);
-
-/// A runtime SoA storage. It stands for **S**tructure **o**f **A**rrays.
-///
-/// ```rust,ignore
-/// struct Test {
-///     foo: Foo,
-///     bar: Bar,
-///     baz: Baz,
-/// }
-/// let test: Vec<Test> = ...; // Array of Structs (*AoS*) layout
-///
-/// struct Test {
-///     foo: Vec<Foo>,
-///     bar: Vec<Bar>,
-///     baz: Vec<Baz>,
-/// }
-/// let test: Test = ...; // SoA layout
-/// ```
-/// Users do not interact with this storage directly, instead [`World`] will use this storage
-/// behind the scenes. In the future there will be other storages such as *AoSoA*, which is a fancy
-/// way of saying *SoA* but with arrays that a limited to a size of `8`.
-pub struct SoaStorage {
-    len: usize,
-    id: StorageId,
-    types: HashSet<TypeId>,
-    storages: HashMap<TypeId, Box<RuntimeStorage>>,
-}
-unsafe impl Send for SoaStorage {}
-unsafe impl Sync for SoaStorage {}
-
-/// A [`Storage`] won't have any arrays or vectors when it is created. [`RegisterComponent`] can
-/// register or add those component arrays. See also [`Archetype::register_component`]
-pub trait RegisterComponent {
-    fn register_component<C: Component>(&mut self);
-}
-
-impl RegisterComponent for SoaStorage {
-    fn register_component<C: Component>(&mut self) {
-        // A `SoAStorage` is backed by `UnsafeStorage`.
-        let type_id = TypeId::of::<C>();
-        self.types.insert(type_id);
-        self.storages
-            .insert(type_id, Box::new(UnsafeStorage::<C>::new()));
-    }
-}
-
-/// [`Storage`] allows to abstract over different types of storages. The most common storage that
-/// implements this trait is [`SoaStorage`].
-pub trait Storage: Sized {
-    fn len(&self) -> usize;
-    fn len_mut(&mut self) -> &mut usize;
-    fn id(&self) -> StorageId;
-    /// Creates an [`Archetype`]. This storage will not have any registered components when it
-    /// is created. See [`RegisterComponent`].
-    fn empty(id: StorageId) -> Archetype<Self>;
-    /// Retrieves the component array and panics if `C` is not inside this storage.
-    unsafe fn component<C: Component>(&self) -> &[C];
-    /// Same as [`Storage::component`] but mutable.
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn component_mut<C: Component>(&self) -> &mut [C];
-    /// Appends components to one array. See [`AppendComponents`] that uses this method.
-    fn push_components<C, I>(&mut self, components: I)
-    where
-        C: Component,
-        I: IntoIterator<Item = C>;
-    fn push_component<C: Component>(&mut self, component: C);
-    /// Returns true if the [`Storage`] has an array of type `C`.
-    fn contains<C: Component>(&self) -> bool;
-    fn types(&self) -> &HashSet<TypeId>;
-    /// Removes **all** the components at the specified index.
-    fn remove(&mut self, id: ComponentId) -> usize;
-}
-
-impl SoaStorage {
-    /// Convenience method to easily access an [`UnsafeStorage`].
-    fn get_storage<C: Component>(&self) -> &UnsafeStorage<C> {
-        let runtime_storage = self
-            .storages
-            .get(&TypeId::of::<C>())
-            .expect("Unknown storage");
-        runtime_storage.as_unsafe_storage::<C>()
-    }
-    /// Same as [`SoaStorage::get_storage`] but mutable.
-    fn get_storage_mut<C: Component>(&mut self) -> &mut UnsafeStorage<C> {
-        let runtime_storage = self
-            .storages
-            .get_mut(&TypeId::of::<C>())
-            .expect("Unknown storage");
-        runtime_storage.as_unsafe_storage_mut::<C>()
-    }
-}
-
-impl Storage for SoaStorage {
-    fn len(&self) -> usize {
-        self.len
-    }
-    fn len_mut(&mut self) -> &mut usize {
-        &mut self.len
-    }
-    fn remove(&mut self, id: ComponentId) -> usize {
-        self.storages.values_mut().for_each(|storage| {
-            storage.remove(id);
-        });
-        self.len -= 1;
-        self.len
-    }
-    fn id(&self) -> StorageId {
-        self.id
-    }
-    fn push_components<C, I>(&mut self, components: I)
-    where
-        C: Component,
-        I: IntoIterator<Item = C>,
-    {
-        unsafe {
-            (*self.get_storage_mut::<C>().inner_mut()).extend(components);
-        }
-    }
-    fn push_component<C: Component>(&mut self, component: C) {
-        unsafe {
-            (*self.get_storage::<C>().inner_mut()).push(component);
-        }
-    }
-    fn empty(id: StorageId) -> Archetype<Self> {
-        let storage = SoaStorage {
-            types: HashSet::new(),
-            storages: HashMap::new(),
-            id,
-            len: 0,
-        };
-        Archetype { storage }
-    }
-    unsafe fn component_mut<C: Component>(&self) -> &mut [C] {
-        (*self.get_storage::<C>().inner_mut()).as_mut_slice()
-    }
-    unsafe fn component<C: Component>(&self) -> &[C] {
-        (*self.get_storage::<C>().inner_mut()).as_slice()
-    }
-
-    fn contains<C: Component>(&self) -> bool {
-        self.types.contains(&TypeId::of::<C>())
-    }
-
-    fn types(&self) -> &HashSet<TypeId> {
-        &self.types
-    }
-}
+expand!(impl_append_components, A, B, C, D, E, F, G);

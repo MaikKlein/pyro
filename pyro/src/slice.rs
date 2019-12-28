@@ -33,7 +33,7 @@ where
 {
     #[inline]
     pub unsafe fn get_unchecked(&self, idx: usize) -> *const T {
-        &*self.start.offset(idx as _) as *const T
+        self.start.add(idx) as *const T
     }
     #[inline]
     pub fn get(&self, idx: usize) -> *const T {
@@ -54,7 +54,7 @@ impl<'a, T> RawSlice<'a, Immutable, T> {
     pub fn split_at(self, idx: usize) -> (Self, Self) {
         unsafe {
             let left = Slice::from_raw(self.start, idx);
-            let right = Slice::from_raw(self.start.offset(idx as _), self.len - idx);
+            let right = Slice::from_raw(self.start.add(idx), self.len - idx);
             (left, right)
         }
     }
@@ -73,7 +73,7 @@ impl<'a, T> RawSlice<'a, Immutable, T> {
 impl<'a, T> RawSlice<'a, Mutable, T> {
     #[inline]
     pub unsafe fn get_unchecked_mut(&self, idx: usize) -> *mut T {
-        self.start.offset(idx as _)
+        self.start.add(idx)
     }
     #[inline]
     pub fn get_mut(&self, idx: usize) -> *mut T {
@@ -101,7 +101,7 @@ impl<'a, T> RawSlice<'a, Mutable, T> {
     pub fn split_at_mut(self, idx: usize) -> (Self, Self) {
         unsafe {
             let left = SliceMut::from_raw(self.start, idx);
-            let right = SliceMut::from_raw(self.start.offset(idx as _), self.len - idx);
+            let right = SliceMut::from_raw(self.start.add(idx), self.len - idx);
             (left, right)
         }
     }
