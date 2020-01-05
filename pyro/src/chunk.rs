@@ -83,12 +83,12 @@ impl Storage {
         }
     }
 
-    pub fn components_raw<C: Component>(&self) -> Slice<C> {
+    pub fn components_raw<C: Component>(&self) -> Slice<'_, C> {
         let allocation = self.storages.get(&TypeId::of::<C>()).unwrap();
         Slice::from_raw(allocation.as_ptr() as *const C, self.len())
     }
 
-    pub fn components_mut_raw<C: Component>(&self) -> SliceMut<C> {
+    pub fn components_mut_raw<C: Component>(&self) -> SliceMut<'_, C> {
         let allocation = self
             .storages
             .get(&TypeId::of::<C>())

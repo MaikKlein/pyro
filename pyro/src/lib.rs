@@ -1,3 +1,4 @@
+#![warn(rust_2018_idioms)]
 //! # What is an Entity Component System?
 //! An Entity Component System or *ECS* is very similar to a relational database like *SQL*. The
 //! [`World`] is the data store where game objects (also known as [`Entity`]) live. An [`Entity`]
@@ -322,7 +323,7 @@ impl World {
     /// ```
     pub fn matcher<'s, Q>(
         &'s self,
-    ) -> impl Iterator<Item = <<Q as Query>::Iter as Iterator>::Item> + 's
+    ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
     where
         Q: Query<'s> + Matcher,
         Q::Borrow: RegisterBorrow,
@@ -942,6 +943,12 @@ impl Archetypes {
                 self.archetypes.last_mut().unwrap()
             };
         archetype.append_components(i);
+    }
+    pub fn is_entity_valid(&self, e: Entity) -> bool {
+        match self.archetypes.get(e.storage_id as usize) {
+            Some(archetype) => archetype.is_valid(e.id, e.version),
+            _ => false,
+        }
     }
 }
 
