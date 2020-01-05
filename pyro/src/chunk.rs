@@ -152,7 +152,7 @@ impl Storage {
             }
         }
         self.len -= 1;
-        last_idx
+        self.len
     }
 }
 

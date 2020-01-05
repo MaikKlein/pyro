@@ -322,7 +322,7 @@ impl World {
     /// ```
     pub fn matcher<'s, Q>(
         &'s self,
-    ) -> impl Iterator<Item = <<Q as Query<'s>>::Iter as Iterator>::Item> + 's
+    ) -> impl Iterator<Item = <<Q as Query>::Iter as Iterator>::Item> + 's
     where
         Q: Query<'s> + Matcher,
         Q::Borrow: RegisterBorrow,
@@ -403,6 +403,7 @@ impl World {
             (id, len)
         };
         let storage_index = storage_id as usize;
+
         if insert_count == 0 {
             return;
         }
@@ -922,3 +923,96 @@ macro_rules! impl_append_components {
 }
 
 expand!(impl_append_components, A, B, C, D, E, F, G);
+
+pub struct Archetypes {
+    archetypes: Vec<Archetype>,
+}
+impl Archetypes {
+    pub fn append_components<A, I>(&mut self, i: I)
+    where
+        A: AppendComponents + BuildStorage,
+        I: IntoIterator<Item = A>,
+    {
+        let archetype =
+            if let Some(archetype) = self.archetypes.iter_mut().find(|arch| arch.is_match::<A>()) {
+                archetype
+            } else {
+                let archetype = Archetype::new::<A>();
+                self.archetypes.push(archetype);
+                self.archetypes.last_mut().unwrap()
+            };
+        archetype.append_components(i);
+    }
+}
+
+pub struct Archetype {
+    component_index: Vec<ComponentId>,
+    component_entity: Vec<ComponentId>,
+    version: Vec<Wrapping<Version>>,
+    free_map: Vec<ComponentId>,
+    storage: Storage,
+}
+
+impl Archetype {
+    pub fn is_match<A: AppendComponents>(&self) -> bool {
+        A::is_match(&self.storage)
+    }
+
+    pub fn new<A: BuildStorage>() -> Self {
+        let storage = A::build();
+        Self {
+            component_index: Vec::new(),
+            component_entity: Vec::new(),
+            version: Vec::new(),
+            free_map: Vec::new(),
+            storage,
+        }
+    }
+
+    fn allocate_entities(&mut self) {
+        if self.component_entity.len() < self.storage.len() {
+            self.component_entity
+                .resize_with(self.storage.len(), Default::default);
+            self.component_index
+                .resize_with(self.storage.len(), Default::default);
+            self.version
+                .resize_with(self.storage.len(), Default::default);
+        }
+    }
+
+    pub fn append_components<A, I>(&mut self, i: I)
+    where
+        A: AppendComponents,
+        I: IntoIterator<Item = A>,
+    {
+        let before_len = self.storage.len();
+        A::append_components(i, &mut self.storage);
+        let after_len = self.storage.len();
+        self.allocate_entities();
+        for id in before_len..after_len {
+            let component_id = id as ComponentId;
+            let insert_at = self.free_map.pop().unwrap_or(component_id);
+            self.component_entity[insert_at as usize] = component_id;
+            self.component_index[component_id as usize] = insert_at;
+        }
+    }
+
+    pub fn is_valid(&self, id: ComponentId, version: Wrapping<Version>) -> bool {
+        match self.index_from_entity(id) {
+            Some(index) => self.version[index as usize] == version,
+            _ => false,
+        }
+    }
+
+    pub fn index_from_entity(&self, id: ComponentId) -> Option<ComponentId> {
+        self.component_index.get(id as usize).copied()
+    }
+
+    pub fn entity_from_index(&self, id: ComponentId) -> ComponentId {
+        self.component_entity[id as usize]
+    }
+
+    pub fn swap_remove(&mut self, id: u32) {
+        self.storage.swap_remove(id as _);
+    }
+}
